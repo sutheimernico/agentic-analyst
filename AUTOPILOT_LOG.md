@@ -1,0 +1,1 @@
+# AUTOPILOT LOG — agentic-analyst

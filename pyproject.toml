@@ -1,0 +1,30 @@
+[project]
+name = "agentic-analyst"
+version = "0.1.0"
+description = "LLM agent that runs EDA on a CSV and emits a report — plus a judge layer that verifies every factual claim against the data"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.40",
+    "duckdb>=1.1",
+    "pandas>=2.2",
+    "scikit-learn>=1.5",
+    "matplotlib>=3.9",
+    "plotly>=5.24",
+    "streamlit>=1.40",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.3", "ruff>=0.8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
