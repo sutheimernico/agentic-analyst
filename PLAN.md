@@ -54,7 +54,15 @@ This is a deliberate design choice, not a shortcut:
   `contradicted` = recompute succeeded and disagrees beyond tolerance;
   `unverified` = the evidence couldn't be executed, didn't produce a single
   comparable value, or claimed a spec the judge can't reproduce. The judge
-  never collapses "couldn't check" into either verified or contradicted.
+  never collapses "couldn't check" into either verified or contradicted, and
+  a recomputed value of `None` always means "couldn't check".
+- **Tight tolerances.** `math.isclose` passes if *either* `rel_tol` or
+  `abs_tol` is satisfied. Since the dominant claim type is a rate/proportion
+  in [0, 1], both default to `0.01`: a loose `abs_tol` (e.g. 0.5) would let
+  almost any non-extreme lie about a proportion slip through the abs_tol
+  branch (a claim of 0.75 vs a real 0.2654 is only 0.48 apart). `abs_tol`
+  only rescues near-zero claims where `rel_tol` collapses; real disagreement
+  is caught by `rel_tol` at 1%.
 - **Baseline verification actually retrains.** `verify_baseline` re-trains
   the same model (features + `random_state`/`max_iter` parsed out of
   `baseline.model`) and recomputes the metric — it does not trust

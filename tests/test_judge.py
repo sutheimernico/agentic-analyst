@@ -57,6 +57,23 @@ def test_planted_false_churn_rate_claim_is_contradicted(tmp_path):
     assert judged.recomputed_value == pytest.approx(REAL_CHURN_RATE, abs=1e-3)
 
 
+def test_moderate_proportion_lie_is_contradicted_under_default_tolerance(tmp_path):
+    # Regression for the abs_tol bug: with abs_tol=0.5, a claim of 0.75 vs the
+    # real 0.2654 (abs diff 0.48, well under 0.5) sailed through as VERIFIED --
+    # gutting the "catch lies" promise for the dominant claim type (rates in
+    # [0, 1]). With the tightened default tolerance it must be contradicted.
+    finding = Finding(
+        claim="75% of customers churned.",
+        evidence_sql_or_code=CHURN_RATE_QUERY,
+        value=0.75,  # abs diff from real ~0.2654 is ~0.48; rel diff ~83%
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)  # default tolerances
+
+    assert judged.verdict == "contradicted"
+    assert judged.recomputed_value == pytest.approx(REAL_CHURN_RATE, abs=1e-3)
+
+
 # --- verify_finding: unverified (couldn't check) is distinct from contradicted
 
 
@@ -100,6 +117,25 @@ def test_finding_with_multi_value_query_is_unverified(tmp_path):
 
     assert judged.verdict == "unverified"
     assert judged.recomputed_value is None
+
+
+def test_numeric_claim_vs_non_numeric_recompute_is_unverified_with_none(tmp_path):
+    # A numeric claim whose evidence returns a categorical (non-numeric) value
+    # is not comparable -- it must be unverified, and (invariant) the
+    # recomputed_value must be None, not the raw string that was found.
+    finding = Finding(
+        claim="The most common contract type, as a number, is 5.",
+        evidence_sql_or_code=(
+            "SELECT Contract FROM data GROUP BY Contract ORDER BY count(*) DESC LIMIT 1"
+        ),
+        value=5,  # numeric claim, but recompute yields the string 'Month-to-month'
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "unverified"
+    assert judged.recomputed_value is None
+    assert "Month-to-month" in judged.detail  # what was actually found is surfaced
 
 
 # --- verify_finding: non-numeric claims ----------------------------------------
@@ -238,6 +274,26 @@ def test_baseline_with_nonexistent_feature_column_is_unverified(tmp_path):
 
     assert judged.verdict == "unverified"
     assert judged.recomputed_value is None
+
+
+def test_baseline_metric_depends_on_feature_set(tmp_path):
+    # Proves verify_baseline actually re-trains on the declared features rather
+    # than echoing the claim: the real ~0.8105 AUC came from 3 features; a
+    # single-feature model produces a materially different metric, so claiming
+    # the 3-feature AUC while declaring only ['tenure'] must be contradicted,
+    # and the recomputed value must differ from the claim.
+    baseline = Baseline(
+        model=REAL_BASELINE_MODEL,
+        features=["tenure"],  # fewer features than produced REAL_BASELINE_AUC
+        metric_name="roc_auc",
+        metric_value=REAL_BASELINE_AUC,
+    )
+
+    judged = verify_baseline(baseline, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "contradicted"
+    assert judged.recomputed_value is not None
+    assert judged.recomputed_value != pytest.approx(REAL_BASELINE_AUC, abs=1e-3)
 
 
 # --- verify_report: wiring + summary counts ------------------------------------

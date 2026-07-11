@@ -272,6 +272,32 @@ def _render_markdown_table(columns: list[str], rows: list[tuple]) -> str:
     return "\n".join([header, separator, *body_lines])
 
 
+def parse_markdown_table(markdown: str) -> tuple[list[str], list[list[str]]]:
+    """Parse a `| a | b |` table as emitted by query_sql/read_schema into
+    (header, data_rows), skipping the `---` separator line.
+
+    Inverse of `_render_markdown_table`. Lives here (not in agent.py or
+    judge.py) because tools.py owns the markdown-table format both other
+    modules read back -- a single parser keeps their idea of "a 1x1 result"
+    from drifting apart.
+    """
+    lines = [ln for ln in markdown.strip().splitlines() if ln.strip().startswith("|")]
+    if len(lines) < 2:
+        raise ValueError(f"expected a markdown table, got: {markdown!r}")
+    header = [c.strip() for c in lines[0].strip("|").split("|")]
+    data_lines = lines[2:] if "---" in lines[1] else lines[1:]
+    rows = [[c.strip() for c in ln.strip("|").split("|")] for ln in data_lines]
+    return header, rows
+
+
+def single_value(markdown: str) -> str:
+    """Extract the one cell of a single-column, single-row query result."""
+    header, rows = parse_markdown_table(markdown)
+    if len(header) != 1 or len(rows) != 1:
+        raise ValueError(f"expected a 1x1 result table, got: {markdown!r}")
+    return rows[0][0]
+
+
 def query_sql(query: str, csv_path: Path, max_rows: int = 200) -> ToolResult:
     """Run a single read-only SQL query over `csv_path`, exposed as view `data`."""
     start = time.monotonic()

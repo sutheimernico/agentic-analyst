@@ -11,7 +11,7 @@
       "claimed_value": 0.2654,
       "verdict": "verified",
       "recomputed_value": 0.2653698707936959,
-      "detail": "recomputed 0.2653698707936959 matches claimed 0.2654 (rel_tol=0.01, abs_tol=0.5)"
+      "detail": "recomputed 0.2653698707936959 matches claimed 0.2654 (rel_tol=0.01, abs_tol=0.01)"
     },
     {
       "claim": "11 rows have a blank (whitespace-only) TotalCharges value -- these are the tenure-0 customers who have not been billed yet.",
@@ -19,7 +19,7 @@
       "claimed_value": 11,
       "verdict": "verified",
       "recomputed_value": 11,
-      "detail": "recomputed 11 matches claimed 11 (rel_tol=0.01, abs_tol=0.5)"
+      "detail": "recomputed 11 matches claimed 11 (rel_tol=0.01, abs_tol=0.01)"
     }
   ],
   "baseline": {

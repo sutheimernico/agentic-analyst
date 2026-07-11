@@ -29,7 +29,14 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from agentic_analyst.report import Report, report_from_dict, validate_report
-from agentic_analyst.tools import ToolResult, query_sql, read_schema, run_python
+from agentic_analyst.tools import (
+    ToolResult,
+    parse_markdown_table,
+    query_sql,
+    read_schema,
+    run_python,
+    single_value,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -508,26 +515,6 @@ def _first_result(calls: list[dict], name: str, query: str | None = None) -> str
     raise ValueError(f"no completed {name} call found" + (f" for query {query!r}" if query else ""))
 
 
-def _single_value(markdown: str):
-    """Extract the one cell of a single-column, single-row query result."""
-    header, rows = _parse_markdown_table(markdown)
-    if len(header) != 1 or len(rows) != 1:
-        raise ValueError(f"expected a 1x1 result table, got: {markdown!r}")
-    return rows[0][0]
-
-
-def _parse_markdown_table(markdown: str) -> tuple[list[str], list[list[str]]]:
-    """Parse a `| a | b |` table as emitted by query_sql/read_schema into
-    (header, data_rows), skipping the `---` separator line."""
-    lines = [ln for ln in markdown.strip().splitlines() if ln.strip().startswith("|")]
-    if len(lines) < 2:
-        raise ValueError(f"expected a markdown table, got: {markdown!r}")
-    header = [c.strip() for c in lines[0].strip("|").split("|")]
-    data_lines = lines[2:] if "---" in lines[1] else lines[1:]
-    rows = [[c.strip() for c in ln.strip("|").split("|")] for ln in data_lines]
-    return header, rows
-
-
 def _build_report_from_messages(messages: list[dict]) -> dict:
     """Build the submit_report input purely from the real tool_result text
     already present in `messages` -- every number here was computed by the
@@ -543,11 +530,11 @@ def _build_report_from_messages(messages: list[dict]) -> dict:
     row_count = int(row_count_match.group(1))
 
     schema_section = schema_text.split("schema:\n", 1)[1].split("\n\nnull_counts:")[0]
-    _, schema_rows = _parse_markdown_table(schema_section)
+    _, schema_rows = parse_markdown_table(schema_section)
     col_count = len(schema_rows)
 
-    churn_rate = float(_single_value(_first_result(calls, "query_sql", CHURN_RATE_QUERY)))
-    n_blank = int(_single_value(_first_result(calls, "query_sql", BLANK_TOTAL_CHARGES_QUERY)))
+    churn_rate = float(single_value(_first_result(calls, "query_sql", CHURN_RATE_QUERY)))
+    n_blank = int(single_value(_first_result(calls, "query_sql", BLANK_TOTAL_CHARGES_QUERY)))
 
     metrics_line = _first_result(calls, "run_python").strip().splitlines()[-1]
     baseline_metrics = json.loads(metrics_line)

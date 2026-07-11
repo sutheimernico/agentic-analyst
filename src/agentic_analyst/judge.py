@@ -40,13 +40,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
-# Reuse the markdown-table single-value parser: it is the exact inverse of
-# `tools._render_markdown_table`, which is what `query_sql` output already
-# is. Re-implementing table parsing here would risk a subtly different
-# parser disagreeing with agent.py's about what "a 1x1 result" means.
-from agentic_analyst.agent import _single_value
 from agentic_analyst.report import Baseline, Dataset, Finding, Report
-from agentic_analyst.tools import query_sql, run_python
+
+# `single_value` is the exact inverse of `tools._render_markdown_table`, which
+# is what `query_sql` output already is. Reusing tools.py's parser (rather than
+# re-implementing table parsing here) keeps this module's idea of "a 1x1
+# result" from drifting apart from the one that produced the table.
+from agentic_analyst.tools import query_sql, run_python, single_value
 
 Verdict = Literal["verified", "unverified", "contradicted"]
 
@@ -88,7 +88,7 @@ def _extract_sql_value(evidence: str, csv_path: Path) -> tuple[str | None, str |
     if not result.ok:
         return None, f"query_sql failed to execute evidence: {result.error}"
     try:
-        return str(_single_value(result.stdout)), None
+        return str(single_value(result.stdout)), None
     except ValueError as exc:
         return None, f"could not extract a single value from the query result: {exc}"
 
@@ -116,10 +116,17 @@ def _extract_python_value(evidence: str, workdir: Path) -> tuple[str | None, str
 
 def _compare(
     claimed: str | int | float, raw: str, rel_tol: float, abs_tol: float
-) -> tuple[Verdict, str | int | float, str]:
+) -> tuple[Verdict, str | int | float | None, str]:
     """Compare a recomputed raw value (always text) against the claimed
     value. Numeric claims are compared with math.isclose; everything else
-    falls back to a normalized (stripped, casefolded) string compare."""
+    falls back to a normalized (stripped, casefolded) string compare.
+
+    Upholds the module invariant `unverified => recomputed_value is None`:
+    the one `unverified` branch here (numeric claim, non-numeric recompute)
+    returns None, not the raw string, so a caller can rely on
+    `recomputed_value is None` meaning "couldn't check". The un-parseable
+    text is surfaced in `detail` instead.
+    """
     claimed_is_numeric = isinstance(claimed, (int, float)) and not isinstance(claimed, bool)
     recomputed_number = _parse_number(raw)
 
@@ -127,7 +134,7 @@ def _compare(
         if recomputed_number is None:
             return (
                 "unverified",
-                raw,
+                None,
                 f"claimed value {claimed!r} is numeric but the recomputed value "
                 f"{raw!r} is not -- values are not comparable",
             )
@@ -214,7 +221,7 @@ def verify_finding(
     csv_path: Path,
     workdir: Path,
     rel_tol: float = 0.01,
-    abs_tol: float = 0.5,
+    abs_tol: float = 0.01,
 ) -> JudgedFinding:
     """Re-execute `finding.evidence_sql_or_code` against the real data and
     compare the recomputed value to `finding.value`.
@@ -223,6 +230,14 @@ def verify_finding(
     or no single comparable value could be extracted from it -- it is
     distinct from `contradicted`, which means the evidence DID run and
     produced a value, but that value disagrees with the claim.
+
+    Tolerances are tight on purpose. `math.isclose` passes if EITHER rel_tol
+    OR abs_tol is satisfied, and the dominant claim type here is a rate /
+    proportion in [0, 1]; a loose abs_tol (e.g. 0.5) would let almost any
+    non-extreme lie about a proportion slip through on the abs_tol branch
+    (claim 0.75 vs real 0.2654 is only 0.48 apart). abs_tol=0.01 matches the
+    baseline metric tolerance and only rescues near-zero claims where rel_tol
+    collapses; real disagreement is caught by rel_tol at 1%.
     """
     evidence = finding.evidence_sql_or_code
     if _is_sql(evidence):
@@ -235,6 +250,10 @@ def verify_finding(
             finding=finding, verdict="unverified", recomputed_value=None, detail=error_detail
         )
 
+    # On the success path an extractor always returns a raw value; assert it
+    # so the implicit "error_detail is None => raw_value is not None" contract
+    # between the extractors and _compare is checked, not just assumed.
+    assert raw_value is not None
     verdict, recomputed_value, detail = _compare(finding.value, raw_value, rel_tol, abs_tol)
     return JudgedFinding(
         finding=finding, verdict=verdict, recomputed_value=recomputed_value, detail=detail
@@ -405,7 +424,7 @@ def verify_report(
     csv_path: Path,
     workdir: Path,
     rel_tol: float = 0.01,
-    abs_tol: float = 0.5,
+    abs_tol: float = 0.01,
     baseline_rel_tol: float = 0.05,
 ) -> JudgedReport:
     """Verify every finding and the baseline in `report`, returning the full
