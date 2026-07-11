@@ -1,0 +1,299 @@
+"""Streamlit report UI (M5): renders the agent's report with inline judge
+verdict badges (verified / unverified / contradicted).
+
+No `ANTHROPIC_API_KEY` is needed: the report comes from `run_agent` driven by
+`FakeLLM` (a deterministic, scripted stand-in for the real Anthropic API --
+see agent.py) run live against the real telco CSV, so every number on screen
+is computed by the real M1 tools, not invented. The real-Claude path
+(`AnthropicClient`) needs an API key -- Needs Nico.
+
+The sidebar "demo the judge" toggle plants one false claim (a DEMO ONLY
+overstated churn rate) via `inject_planted_false_claim` before re-judging, so
+the honest all-green report and the judge actually catching a lie are both
+visible from the same UI. `inject_planted_false_claim` is a plain function
+(not buried in a Streamlit callback) so it -- and the resulting contradicted
+verdict -- are directly unit-testable; see tests/test_app.py.
+
+Run: uv run streamlit run app.py
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+import streamlit as st
+
+from agentic_analyst.agent import CHURN_RATE_QUERY, FakeLLM, run_agent
+from agentic_analyst.judge import JudgedBaseline, JudgedFinding, JudgedReport, verify_report
+from agentic_analyst.report import Report
+
+REPO_ROOT = Path(__file__).resolve().parent
+CSV_PATH = REPO_ROOT / "data" / "telco-customer-churn.csv"
+
+# The demo lie: overstate the churn rate. Matches PLAN.md's worked example
+# (claimed 0.75 vs. the real ~0.2654) so the README and the UI tell the same
+# story. Clearly labeled in the claim text as an injected demonstration --
+# never presented as a real number from the data.
+TAMPERED_VALUE = 0.75
+TAMPERED_CLAIM = (
+    "[DEMO INJECTED LIE] 75% of customers churned -- almost everyone leaves! "
+    "(planted for this demo; the judge below recomputes the real figure)"
+)
+
+STATUS_META: dict[str, tuple[str, str, str]] = {
+    # verdict -> (color, icon, label). Colors are the fixed status palette --
+    # reserved for verdicts only, never reused for anything categorical.
+    "verified": ("#0ca30c", "✓", "verified"),
+    "contradicted": ("#d03b3b", "✗", "contradicted"),
+    "unverified": ("#fab219", "?", "unverified"),
+}
+
+_INK_SECONDARY = "#52514e"
+
+
+def inject_planted_false_claim(report: Report) -> Report:
+    """Return a copy of `report` with the churn-rate finding's claimed value
+    overstated to `TAMPERED_VALUE`, for the "demo the judge" toggle.
+
+    Pure and side-effect-free (uses `dataclasses.replace`, never mutates
+    `report`) so it is directly testable without Streamlit. Only the
+    finding whose evidence is the churn-rate query is touched; every other
+    finding and the baseline pass through unchanged. This never touches the
+    underlying CSV or the evidence query itself -- the judge re-executes
+    that same query against the real data, which is exactly why it catches
+    the lie.
+    """
+    tampered_findings = [
+        dataclasses.replace(finding, claim=TAMPERED_CLAIM, value=TAMPERED_VALUE)
+        if finding.evidence_sql_or_code == CHURN_RATE_QUERY
+        else finding
+        for finding in report.findings
+    ]
+    return dataclasses.replace(report, findings=tampered_findings)
+
+
+@st.cache_data(show_spinner="Running the FakeLLM demo agent over the telco CSV...")
+def _run_demo_report() -> Report:
+    with TemporaryDirectory(prefix="agentic-analyst-app-agent-") as tmp:
+        return run_agent(FakeLLM(CSV_PATH), CSV_PATH, Path(tmp))
+
+
+@st.cache_data(show_spinner="Judge is independently re-verifying every claim...")
+def get_judged_report(tamper: bool) -> tuple[Report, JudgedReport]:
+    """Build the (report, judged_report) pair for the given toggle state.
+
+    Cached per `tamper` value so flipping the toggle back and forth in the
+    running app doesn't re-run the sandboxed subprocess pipeline (SQL
+    profiling + a fresh LogisticRegression retrain in the judge) every time.
+    """
+    report = _run_demo_report()
+    if tamper:
+        report = inject_planted_false_claim(report)
+    with TemporaryDirectory(prefix="agentic-analyst-app-judge-") as tmp:
+        judged = verify_report(report, CSV_PATH, Path(tmp))
+    return report, judged
+
+
+def _inject_style() -> None:
+    st.markdown(
+        f"""
+        <style>
+        .aa-badge {{
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 999px;
+            font-weight: 600;
+            font-size: 0.85rem;
+            white-space: nowrap;
+        }}
+        .aa-stat {{
+            text-align: center;
+            padding: 14px 8px;
+            border-radius: 10px;
+            border: 1px solid rgba(137, 135, 129, 0.4);
+        }}
+        .aa-stat-value {{
+            font-size: 1.9rem;
+            font-weight: 700;
+            line-height: 1.2;
+        }}
+        .aa-stat-label {{
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: {_INK_SECONDARY};
+        }}
+        .aa-value-box {{
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 0.95rem;
+            margin-right: 8px;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _badge_html(verdict: str) -> str:
+    color, icon, label = STATUS_META[verdict]
+    text_color = "#0b0b0b" if verdict == "unverified" else "#fcfcfb"
+    return (
+        f'<span class="aa-badge" style="background:{color};color:{text_color};">'
+        f"{icon} {label}</span>"
+    )
+
+
+def _value_box_html(label: str, value: object, color: str) -> str:
+    return (
+        f'<span class="aa-value-box" style="background:{color}22;border:1px solid {color};'
+        f'color:{color};"><b>{label}:</b> {value}</span>'
+    )
+
+
+def _evidence_language(evidence: str) -> str:
+    leading = evidence.strip().split(None, 1)[0].upper() if evidence.strip() else ""
+    return "sql" if leading in ("SELECT", "WITH") else "python"
+
+
+def render_summary(summary: dict[str, int]) -> None:
+    cols = st.columns(3)
+    for col, key in zip(cols, ("verified", "unverified", "contradicted"), strict=True):
+        color, icon, label = STATUS_META[key]
+        count = summary.get(key, 0)
+        col.markdown(
+            f'<div class="aa-stat" style="border-color:{color};">'
+            f'<div class="aa-stat-value" style="color:{color};">{icon} {count}</div>'
+            f'<div class="aa-stat-label">{label}</div>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+
+def render_finding_card(judged_finding: JudgedFinding) -> None:
+    finding = judged_finding.finding
+    st.markdown(f"**Claim:** {finding.claim}")
+    st.code(finding.evidence_sql_or_code, language=_evidence_language(finding.evidence_sql_or_code))
+    st.markdown(_badge_html(judged_finding.verdict), unsafe_allow_html=True)
+
+    if judged_finding.verdict == "contradicted":
+        st.markdown(
+            _value_box_html("Claimed", finding.value, STATUS_META["contradicted"][0])
+            + _value_box_html("Recomputed (real)", judged_finding.recomputed_value, "#0ca30c"),
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f'<span style="color:{_INK_SECONDARY};">Claimed: <code>{finding.value}</code> '
+            f"&nbsp;&middot;&nbsp; Recomputed: <code>{judged_finding.recomputed_value}</code>"
+            "</span>",
+            unsafe_allow_html=True,
+        )
+    st.caption(judged_finding.detail)
+
+
+def render_baseline_card(judged_baseline: JudgedBaseline) -> None:
+    baseline = judged_baseline.baseline
+    st.markdown(f"**Baseline model:** `{baseline.model}`")
+    st.code(f"features = {baseline.features}", language="python")
+    st.markdown(_badge_html(judged_baseline.verdict), unsafe_allow_html=True)
+
+    claimed = f"{baseline.metric_value:.4f}"
+    recomputed_value = judged_baseline.recomputed_value
+    recomputed = f"{recomputed_value:.4f}" if recomputed_value is not None else "n/a"
+    contradicted_color = STATUS_META["contradicted"][0]
+    if judged_baseline.verdict == "contradicted":
+        st.markdown(
+            _value_box_html(f"Claimed {baseline.metric_name}", claimed, contradicted_color)
+            + _value_box_html(f"Recomputed {baseline.metric_name} (real)", recomputed, "#0ca30c"),
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f'<span style="color:{_INK_SECONDARY};">Claimed {baseline.metric_name}: '
+            f"<code>{claimed}</code> &nbsp;&middot;&nbsp; "
+            f"Recomputed: <code>{recomputed}</code></span>",
+            unsafe_allow_html=True,
+        )
+    if baseline.notes:
+        st.caption(baseline.notes)
+    st.caption(judged_baseline.detail)
+
+
+def main() -> None:
+    st.set_page_config(
+        page_title="Agentic Analyst -- Honest Report", page_icon="\U0001f50e", layout="wide"
+    )
+    _inject_style()
+
+    st.title("\U0001f50e Agentic Analyst")
+    st.caption(
+        "An LLM agent runs EDA + a baseline model on the telco churn dataset. "
+        "A judge layer independently recomputes and flags every claim -- that's the point."
+    )
+    st.info(
+        "**Demo mode:** this report comes from the deterministic `FakeLLM` agent "
+        "(scripted tool-call sequence, but every number is computed live by the real "
+        "sandboxed tools against the real telco CSV) -- no `ANTHROPIC_API_KEY` needed. "
+        "The real-Claude agent path (`AnthropicClient`) needs an API key in `.env` -- Needs Nico.",
+        icon="ℹ️",
+    )
+
+    with st.sidebar:
+        st.header("Demo controls")
+        tamper = st.toggle(
+            "\U0001f52c Inject a planted false claim (demo the judge)",
+            value=False,
+            help=(
+                "DEMONSTRATION ONLY. When on, overstates the churn-rate finding before "
+                "re-judging, so you can watch the judge catch it: a red 'contradicted' "
+                "badge with the claimed value next to the real recomputed one. The "
+                "planted claim is clearly labeled in the report as an injected demo lie "
+                "-- it is never presented as a real number."
+            ),
+        )
+        st.divider()
+        st.file_uploader(
+            "Upload your own CSV",
+            type="csv",
+            disabled=True,
+            help=(
+                "Disabled in this demo. FakeLLM's tool-call sequence is scripted for the "
+                "telco schema and can't analyze an arbitrary CSV -- that needs the real "
+                "Claude agent (ANTHROPIC_API_KEY, real tool-use loop). This demo always "
+                "analyzes the committed telco-customer-churn.csv."
+            ),
+        )
+
+    _report, judged = get_judged_report(tamper)
+
+    if tamper:
+        st.warning(
+            "\U0001f52c **Demo tamper active** -- the churn-rate finding below has been "
+            "deliberately overstated to demonstrate the judge catching a lie. That "
+            "claimed value is NOT real; the recomputed value next to it is.",
+            icon="\U0001f52c",
+        )
+
+    st.subheader("Summary")
+    render_summary(judged.summary)
+
+    st.subheader(f"Dataset: {judged.dataset.name}")
+    st.caption(f"{judged.dataset.rows} rows × {judged.dataset.cols} columns")
+
+    st.subheader("Findings")
+    for judged_finding in judged.findings:
+        with st.container(border=True):
+            render_finding_card(judged_finding)
+
+    st.subheader("Baseline")
+    with st.container(border=True):
+        render_baseline_card(judged.baseline)
+
+
+if __name__ == "__main__":
+    main()
