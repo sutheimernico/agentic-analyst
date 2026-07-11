@@ -189,6 +189,35 @@ def test_query_sql_rejects_empty_query():
     assert not result.ok
 
 
+def test_query_sql_rejects_file_read_via_read_csv_auto():
+    # A bare SELECT can otherwise call read_csv_auto('/etc/passwd') and exfil
+    # arbitrary files -- must be rejected by the validator before execution.
+    result = query_sql("SELECT * FROM read_csv_auto('/etc/passwd') LIMIT 1", TELCO_CSV)
+
+    assert not result.ok
+    assert "DuckDB error" not in result.error
+    assert "root:" not in result.stdout
+
+
+def test_query_sql_rejects_glob():
+    result = query_sql("SELECT * FROM glob('/etc/*')", TELCO_CSV)
+
+    assert not result.ok
+    assert "DuckDB error" not in result.error
+
+
+def test_query_sql_rejects_with_prefix_dml_bypass():
+    # `WITH x AS (...) INSERT ...` is a single statement whose leading keyword
+    # is the allowed WITH, so the leading-keyword check passes -- the token
+    # scan must still catch the hidden INSERT, and the rejection must come from
+    # our validator, NOT from DuckDB after execution.
+    result = query_sql("WITH x AS (SELECT 1) INSERT INTO data VALUES (1)", TELCO_CSV)
+
+    assert not result.ok
+    assert "DuckDB error" not in result.error
+    assert "insert" in result.error.lower()
+
+
 # --- read_schema ---------------------------------------------------------------
 
 
@@ -234,3 +263,28 @@ def test_read_schema_rejects_non_integer_n_preview():
 
     assert not result.ok
     assert "n_preview must be an integer" in result.error
+
+
+def test_read_schema_adversarial_column_name_no_stacked_execution(tmp_path):
+    # read_schema builds null-count SQL by interpolating column names taken
+    # from the (untrusted) CSV header. A header cell that breaks out of the
+    # quoted identifier and stacks an ATTACH would create a file on disk.
+    # Proper identifier quoting must neutralise it: the tool still reports the
+    # (weirdly named) column, and no side-effect file appears.
+    sentinel = tmp_path / "pwned.db"
+    assert not sentinel.exists()
+
+    evil_col = (
+        f'''x" IS NULL THEN 0 END) AS z FROM (SELECT 1 AS x); '''
+        f'''ATTACH '{sentinel}' AS ev; SELECT count(*) --'''
+    )
+    csv_path = tmp_path / "adversarial_header.csv"
+    # CSV-quote the header cell by doubling embedded double-quotes
+    csv_path.write_text('"' + evil_col.replace('"', '""') + '"\n1\n')
+
+    result = read_schema(csv_path)
+
+    assert not sentinel.exists()  # the stacked ATTACH must NOT have run
+    assert result.ok
+    # the adversarial string is treated as an ordinary column name
+    assert "IS NULL THEN 0 END" in result.stdout

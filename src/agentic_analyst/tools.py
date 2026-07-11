@@ -8,8 +8,14 @@ accidental/careless LLM-generated code (infinite loops, memory bombs, stray
 network calls, obviously bad SQL) — it is NOT a security boundary against a
 determined adversary. We have no user namespaces, no seccomp, no container,
 no root here; a subprocess run as the same OS user with `python -I` and
-rlimits can still be escaped by someone who wants to (e.g. via os.fork before
-rlimits apply to children, reading other files the OS user can read, etc.).
+rlimits can still be escaped by someone who wants to. Known, unpatched gaps:
+- `os.fork` spawns children before/around the rlimits and lets code sidestep
+  the wall-clock timeout logic.
+- The network kill-switch only monkeypatches `socket.socket` and
+  `socket.create_connection`. DNS resolution via `socket.getaddrinfo` is NOT
+  blocked, and code can reach the raw C-level socket module (`import _socket`)
+  to build a connection that never touches the patched names.
+- Any file the OS user can read is readable (no filesystem jail).
 If this ever runs on multi-tenant infra or executes anything other than
 "an LLM occasionally being sloppy", wrap it in a real sandbox (container,
 gVisor, firecracker, or a hosted code-execution service).
@@ -154,6 +160,43 @@ def run_python(
 # reaches DuckDB.
 _ALLOWED_LEADING_KEYWORDS = ("SELECT", "WITH", "SUMMARIZE", "DESCRIBE")
 
+# Bare tokens that must never appear anywhere in a query_sql submission, even
+# inside an otherwise-allowed SELECT/WITH. This blocks (a) file / external
+# table functions that read arbitrary paths (`read_csv_auto('/etc/passwd')`,
+# `glob('/etc/*')`), (b) catalog / extension manipulation, and (c) DML that can
+# hide behind a leading WITH (`WITH x AS (SELECT 1) INSERT ...`), which the
+# leading-keyword check alone does not catch. The scan is deliberately
+# conservative: it matches these as whole identifier tokens anywhere in the
+# query, so a column or string literal that happens to equal one of these words
+# (e.g. a column literally named "insert") is rejected too. That false positive
+# is acceptable -- query_sql's only contract is to read the `data` view.
+_FORBIDDEN_TOKENS = frozenset(
+    {
+        # arbitrary file / external table access
+        "read_csv",
+        "read_csv_auto",
+        "read_parquet",
+        "read_json",
+        "read_json_auto",
+        "read_ndjson",
+        "read_text",
+        "glob",
+        # catalog / extension manipulation
+        "attach",
+        "detach",
+        "install",
+        "load",
+        "copy",
+        # DML that can hide after a leading WITH
+        "insert",
+        "update",
+        "delete",
+        "merge",
+    }
+)
+
+_IDENTIFIER_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
 
 def _validate_single_select(query: str) -> str | None:
     """Return an error message if the query is not a single read statement."""
@@ -172,7 +215,27 @@ def _validate_single_select(query: str) -> str | None:
             f"only {'/'.join(_ALLOWED_LEADING_KEYWORDS)} statements are allowed, "
             f"got statement starting with '{leading_word or body[:20]}'"
         )
+
+    tokens = {t.lower() for t in _IDENTIFIER_TOKEN.findall(body)}
+    forbidden = tokens & _FORBIDDEN_TOKENS
+    if forbidden:
+        return (
+            f"disallowed keyword(s) in query: {', '.join(sorted(forbidden))} "
+            "-- file access, catalog changes and DML are not permitted; "
+            "only read the `data` view"
+        )
     return None
+
+
+def _quote_ident(name: str) -> str:
+    """Quote a SQL identifier, doubling any embedded double-quote.
+
+    Column names come from the untrusted CSV header (via DESCRIBE); without
+    this, a header cell like `x" ...; ATTACH '...' --` would break out of the
+    quoted identifier and inject stacked SQL. Doubling embedded `"` keeps the
+    whole thing a single valid identifier.
+    """
+    return '"' + name.replace('"', '""') + '"'
 
 
 def _create_data_view(con: duckdb.DuckDBPyConnection, csv_path: Path) -> None:
@@ -277,7 +340,9 @@ def read_schema(csv_path: Path, n_preview: int = 5) -> ToolResult:
         row_count = con.execute("SELECT count(*) FROM data").fetchone()[0]
 
         null_count_exprs = ", ".join(
-            f'sum(CASE WHEN "{col}" IS NULL THEN 1 ELSE 0 END) AS "{col}"' for col in column_names
+            f"sum(CASE WHEN {_quote_ident(col)} IS NULL THEN 1 ELSE 0 END) "
+            f"AS {_quote_ident(col)}"
+            for col in column_names
         )
         null_counts_row = con.execute(f"SELECT {null_count_exprs} FROM data").fetchone()
 
