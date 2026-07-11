@@ -404,25 +404,19 @@ def run_agent(llm: LLMClient, csv_path: Path, workdir: Path, max_iters: int = 12
 # report's numbers are computed by the real M1 tools against the real CSV;
 # only "which tool to call next" is scripted.
 
-PROFILE_QUERY = (
-    "SELECT count(*) AS n, "
-    "sum(CASE WHEN Churn = 'Yes' THEN 1 ELSE 0 END) AS n_churn, "
-    "sum(CASE WHEN trim(TotalCharges) = '' THEN 1 ELSE 0 END) AS n_blank_total_charges "
-    "FROM data"
+# One profiling query per claimed value, so a judge (M4) can recompute the
+# single scalar each finding's `evidence_sql_or_code` returns and compare it
+# to that finding's `value` -- no need to parse the claim text to pick a
+# column out of a multi-column result.
+CHURN_RATE_QUERY = "SELECT avg(CASE WHEN Churn = 'Yes' THEN 1.0 ELSE 0 END) AS churn_rate FROM data"
+BLANK_TOTAL_CHARGES_QUERY = (
+    "SELECT sum(CASE WHEN trim(TotalCharges) = '' THEN 1 ELSE 0 END) AS n_blank FROM data"
 )
 
-# OPENBLAS_NUM_THREADS/OMP_NUM_THREADS must be set before numpy is imported:
-# left at their defaults, OpenBLAS reserves per-thread virtual memory scaled
-# to the host's core count, which blows past run_python's default 1024MB
-# RLIMIT_AS cap (observed failure: "OpenBLAS error: Memory allocation still
-# failed after 10 retries") even though actual usage on this small dataset
-# is tiny.
+# run_python's sandbox pins OPENBLAS_NUM_THREADS/OMP_NUM_THREADS=1 in the
+# child env (see tools.py), so model-generated training code -- including
+# this scripted baseline -- does not need to set them itself.
 BASELINE_CODE_TEMPLATE = """
-import os
-
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["OMP_NUM_THREADS"] = "1"
-
 import json
 
 import pandas as pd
@@ -472,13 +466,14 @@ def _get_block_attr(block: object, name: str) -> object:
     return getattr(block, name, None)
 
 
-def _collect_tool_results(messages: list[dict]) -> dict[str, str]:
-    """Map tool name -> the tool_result content text that answered it, by
-    pairing each tool_result's `tool_use_id` back to the tool_use block that
-    requested it. Handles both the dataclass blocks in assistant turns and
-    the plain dicts in the user turns we construct ourselves."""
-    id_to_name: dict[str, str] = {}
-    results: dict[str, str] = {}
+def _collect_tool_calls(messages: list[dict]) -> list[dict]:
+    """Return each completed tool call as {name, input, content}, pairing
+    every tool_result back to the tool_use block that requested it via
+    `tool_use_id`. A list (not a name->content dict) so multiple query_sql
+    calls in one run stay distinct. Handles both the dataclass blocks in
+    assistant turns and the plain dicts in the user turns we build."""
+    by_id: dict[str, dict] = {}
+    order: list[str] = []
     for message in messages:
         content = message.get("content")
         if not isinstance(content, list):
@@ -487,15 +482,38 @@ def _collect_tool_results(messages: list[dict]) -> dict[str, str]:
             block_type = _get_block_attr(block, "type")
             if block_type == "tool_use":
                 block_id = _get_block_attr(block, "id")
-                block_name = _get_block_attr(block, "name")
-                if block_id and block_name:
-                    id_to_name[block_id] = block_name
+                if block_id:
+                    by_id[block_id] = {
+                        "name": _get_block_attr(block, "name"),
+                        "input": _get_block_attr(block, "input"),
+                        "content": None,
+                    }
+                    order.append(block_id)
             elif block_type == "tool_result":
                 tool_use_id = _get_block_attr(block, "tool_use_id")
-                name = id_to_name.get(tool_use_id)
-                if name:
-                    results[name] = _get_block_attr(block, "content")
-    return results
+                if tool_use_id in by_id:
+                    by_id[tool_use_id]["content"] = _get_block_attr(block, "content")
+    return [by_id[block_id] for block_id in order]
+
+
+def _first_result(calls: list[dict], name: str, query: str | None = None) -> str:
+    """The content of the first completed call to `name` (optionally the one
+    whose `query` input matches). Raises if no such call produced a result."""
+    for call in calls:
+        if call["name"] != name or call["content"] is None:
+            continue
+        if query is not None and (call["input"] or {}).get("query") != query:
+            continue
+        return call["content"]
+    raise ValueError(f"no completed {name} call found" + (f" for query {query!r}" if query else ""))
+
+
+def _single_value(markdown: str):
+    """Extract the one cell of a single-column, single-row query result."""
+    header, rows = _parse_markdown_table(markdown)
+    if len(header) != 1 or len(rows) != 1:
+        raise ValueError(f"expected a 1x1 result table, got: {markdown!r}")
+    return rows[0][0]
 
 
 def _parse_markdown_table(markdown: str) -> tuple[list[str], list[list[str]]]:
@@ -513,10 +531,12 @@ def _parse_markdown_table(markdown: str) -> tuple[list[str], list[list[str]]]:
 def _build_report_from_messages(messages: list[dict]) -> dict:
     """Build the submit_report input purely from the real tool_result text
     already present in `messages` -- every number here was computed by the
-    actual M1 tools, not invented."""
-    tool_results = _collect_tool_results(messages)
+    actual M1 tools, not invented. Each finding's evidence query returns
+    exactly the one value the finding claims (see the query constants), so
+    M4's judge can recompute and compare without parsing the claim text."""
+    calls = _collect_tool_calls(messages)
 
-    schema_text = tool_results["read_schema"]
+    schema_text = _first_result(calls, "read_schema")
     row_count_match = re.search(r"row_count:\s*(\d+)", schema_text)
     if not row_count_match:
         raise ValueError(f"could not find row_count in read_schema output: {schema_text!r}")
@@ -526,22 +546,21 @@ def _build_report_from_messages(messages: list[dict]) -> dict:
     _, schema_rows = _parse_markdown_table(schema_section)
     col_count = len(schema_rows)
 
-    profile_header, profile_rows = _parse_markdown_table(tool_results["query_sql"])
-    profile = dict(zip(profile_header, profile_rows[0], strict=True))
-    n = int(profile["n"])
-    n_churn = int(profile["n_churn"])
-    n_blank = int(profile["n_blank_total_charges"])
-    churn_rate = n_churn / n
+    churn_rate = float(_single_value(_first_result(calls, "query_sql", CHURN_RATE_QUERY)))
+    n_blank = int(_single_value(_first_result(calls, "query_sql", BLANK_TOTAL_CHARGES_QUERY)))
 
-    metrics_line = tool_results["run_python"].strip().splitlines()[-1]
+    metrics_line = _first_result(calls, "run_python").strip().splitlines()[-1]
     baseline_metrics = json.loads(metrics_line)
 
     return {
         "dataset": {"name": "telco-customer-churn", "rows": row_count, "cols": col_count},
         "findings": [
             {
-                "claim": f"{n_churn} of {n} customers churned ({churn_rate:.1%}).",
-                "evidence_sql_or_code": PROFILE_QUERY,
+                "claim": (
+                    f"{churn_rate:.1%} of customers churned (target class "
+                    "Churn = 'Yes'); the dataset is imbalanced toward non-churners."
+                ),
+                "evidence_sql_or_code": CHURN_RATE_QUERY,
                 "value": round(churn_rate, 4),
             },
             {
@@ -550,7 +569,7 @@ def _build_report_from_messages(messages: list[dict]) -> dict:
                     "value -- these are the tenure-0 customers who have not been "
                     "billed yet."
                 ),
-                "evidence_sql_or_code": PROFILE_QUERY,
+                "evidence_sql_or_code": BLANK_TOTAL_CHARGES_QUERY,
                 "value": n_blank,
             },
         ],
@@ -584,10 +603,11 @@ def _build_report_from_messages(messages: list[dict]) -> dict:
 class FakeLLM:
     """Deterministic, scripted stand-in for the real Anthropic API.
 
-    Emits a fixed sequence of tool calls -- read_schema, then one query_sql
-    profiling call, then a run_python call that trains the churn baseline --
-    and finally a submit_report call whose content is built from the real
-    tool_result text those calls produced (see `_build_report_from_messages`).
+    Emits a fixed sequence of tool calls -- read_schema, one query_sql per
+    profiling value (churn rate, then blank-TotalCharges count), then a
+    run_python call that trains the churn baseline -- and finally a
+    submit_report call whose content is built from the real tool_result text
+    those calls produced (see `_build_report_from_messages`).
     """
 
     def __init__(self, csv_path: str | Path) -> None:
@@ -607,10 +627,12 @@ class FakeLLM:
         if self._step == 1:
             return self._tool_call("read_schema", {})
         if self._step == 2:
-            return self._tool_call("query_sql", {"query": PROFILE_QUERY})
+            return self._tool_call("query_sql", {"query": CHURN_RATE_QUERY})
         if self._step == 3:
-            return self._tool_call("run_python", {"code": _render_baseline_code(self._csv_path)})
+            return self._tool_call("query_sql", {"query": BLANK_TOTAL_CHARGES_QUERY})
         if self._step == 4:
+            return self._tool_call("run_python", {"code": _render_baseline_code(self._csv_path)})
+        if self._step == 5:
             return self._tool_call("submit_report", _build_report_from_messages(messages))
 
         # Scripted sequence is exhausted -- stop instead of looping forever.

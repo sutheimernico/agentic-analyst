@@ -128,6 +128,28 @@ def test_run_python_env_is_scrubbed(tmp_path, monkeypatch):
     assert "super-secret-value" not in result.stdout
 
 
+def test_run_python_can_train_sklearn_without_caller_setting_thread_env(tmp_path):
+    # OpenBLAS (via numpy/sklearn) reserves per-thread virtual address space
+    # scaled to the host core count on first import; unbounded, that blows
+    # past run_python's RLIMIT_AS cap on a many-core box and any sklearn fit
+    # dies with "OpenBLAS error: Memory allocation still failed". The sandbox
+    # must pin OPENBLAS_NUM_THREADS/OMP_NUM_THREADS itself so model-generated
+    # training code -- which never sets them -- works. This code deliberately
+    # does NOT set those env vars.
+    code = (
+        "import numpy as np\n"
+        "from sklearn.linear_model import LogisticRegression\n"
+        "X = np.random.rand(500, 5)\n"
+        "y = (X[:, 0] > 0.5).astype(int)\n"
+        "LogisticRegression(max_iter=1000, random_state=42).fit(X, y)\n"
+        "print('sklearn fit ok')\n"
+    )
+    result = run_python(code, workdir=tmp_path, timeout_s=60)
+
+    assert result.ok, result.stderr
+    assert "sklearn fit ok" in result.stdout
+
+
 # --- query_sql ---------------------------------------------------------------
 
 

@@ -108,10 +108,22 @@ def run_python(
       subprocess.communicate(timeout=...).
     - Network kill-switch prelude: monkeypatches socket.socket and
       socket.create_connection to raise before user code runs.
+
+    OPENBLAS_NUM_THREADS/OMP_NUM_THREADS are pinned to 1 in the child env
+    because OpenBLAS (pulled in transitively by numpy/scikit-learn) reserves
+    per-thread virtual address space scaled to the host core count when
+    first imported. On a many-core box that reservation blows past the
+    RLIMIT_AS cap and any numpy/sklearn work dies with "OpenBLAS error:
+    Memory allocation still failed after 10 retries" -- long before actual
+    working-set memory is a concern. Setting these here protects ALL
+    model-generated code at the sandbox level; the model neither knows about
+    the quirk nor should have to.
     """
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": str(workdir),
+        "OPENBLAS_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
     }
     full_code = _NETWORK_KILL_SWITCH + "\n" + code
 

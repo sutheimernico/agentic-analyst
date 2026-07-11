@@ -6,13 +6,13 @@
   },
   "findings": [
     {
-      "claim": "1869 of 7043 customers churned (26.5%).",
-      "evidence_sql_or_code": "SELECT count(*) AS n, sum(CASE WHEN Churn = 'Yes' THEN 1 ELSE 0 END) AS n_churn, sum(CASE WHEN trim(TotalCharges) = '' THEN 1 ELSE 0 END) AS n_blank_total_charges FROM data",
+      "claim": "26.5% of customers churned (target class Churn = 'Yes'); the dataset is imbalanced toward non-churners.",
+      "evidence_sql_or_code": "SELECT avg(CASE WHEN Churn = 'Yes' THEN 1.0 ELSE 0 END) AS churn_rate FROM data",
       "value": 0.2654
     },
     {
       "claim": "11 rows have a blank (whitespace-only) TotalCharges value -- these are the tenure-0 customers who have not been billed yet.",
-      "evidence_sql_or_code": "SELECT count(*) AS n, sum(CASE WHEN Churn = 'Yes' THEN 1 ELSE 0 END) AS n_churn, sum(CASE WHEN trim(TotalCharges) = '' THEN 1 ELSE 0 END) AS n_blank_total_charges FROM data",
+      "evidence_sql_or_code": "SELECT sum(CASE WHEN trim(TotalCharges) = '' THEN 1 ELSE 0 END) AS n_blank FROM data",
       "value": 11
     }
   ],
