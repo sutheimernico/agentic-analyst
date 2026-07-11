@@ -1,0 +1,37 @@
+{
+  "dataset": {
+    "name": "telco-customer-churn",
+    "rows": 7043,
+    "cols": 21
+  },
+  "findings": [
+    {
+      "claim": "1869 of 7043 customers churned (26.5%).",
+      "evidence_sql_or_code": "SELECT count(*) AS n, sum(CASE WHEN Churn = 'Yes' THEN 1 ELSE 0 END) AS n_churn, sum(CASE WHEN trim(TotalCharges) = '' THEN 1 ELSE 0 END) AS n_blank_total_charges FROM data",
+      "value": 0.2654
+    },
+    {
+      "claim": "11 rows have a blank (whitespace-only) TotalCharges value -- these are the tenure-0 customers who have not been billed yet.",
+      "evidence_sql_or_code": "SELECT count(*) AS n, sum(CASE WHEN Churn = 'Yes' THEN 1 ELSE 0 END) AS n_churn, sum(CASE WHEN trim(TotalCharges) = '' THEN 1 ELSE 0 END) AS n_blank_total_charges FROM data",
+      "value": 11
+    }
+  ],
+  "data_quality_issues": [
+    "TotalCharges is read as VARCHAR, not numeric, because 11 rows hold a single-space string instead of a number; it must be coerced with pd.to_numeric(..., errors='coerce') and the resulting NaNs handled before it can be used as a model feature."
+  ],
+  "baseline": {
+    "model": "LogisticRegression(random_state=42, max_iter=1000)",
+    "features": [
+      "tenure",
+      "MonthlyCharges",
+      "TotalCharges"
+    ],
+    "metric_name": "roc_auc",
+    "metric_value": 0.8105272675605157,
+    "notes": "accuracy=0.7722 on a stratified 80/20 train/test split (random_state=42), features standardized."
+  },
+  "caveats": [
+    "Baseline uses 3 numeric features only; categorical service and contract features (Contract, InternetService, PaymentMethod, ...) were profiled but not yet included, and would likely improve the model.",
+    "Single train/test split, no cross-validation -- metric_value has some variance across seeds."
+  ]
+}

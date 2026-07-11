@@ -23,9 +23,9 @@ separates this from "another GPT wrapper".
 - Tooling: uv + ruff + pytest.
 
 ## Milestones (verifiable)
-1. **Tools** — `run_python` (sandboxed), `query_sql` (DuckDB), schema reader. Test each tool in isolation.
-2. **Agent loop** — tool-use loop that profiles the data and emits a structured report (findings + numbers + a proposed baseline). Deterministic-enough via low temperature + seeds where possible.
-3. **Baseline modelling** — agent proposes features, trains + evaluates a churn classifier, reports metrics.
+1. **Tools** — `run_python` (sandboxed), `query_sql` (DuckDB), schema reader. Test each tool in isolation. **DONE.**
+2. **Agent loop** — tool-use loop that profiles the data and emits a structured report (findings + numbers + a proposed baseline). Deterministic-enough via low temperature + seeds where possible. **DONE** — manual tool-use loop against an `LLMClient` protocol (`AnthropicClient` real-SDK wrapper + `FakeLLM` deterministic harness, no API key available); `results/report.json` is a committed demo artifact from `scripts/demo_fake_run.py`. Real-API run is Needs Nico (`ANTHROPIC_API_KEY` in `.env`).
+3. **Baseline modelling** — agent proposes features, trains + evaluates a churn classifier, reports metrics. **DONE** — LogisticRegression on tenure/MonthlyCharges/TotalCharges, stratified 80/20 split, random_state=42; ROC-AUC ≈0.81, accuracy ≈0.77 in the demo run.
 4. **Judge layer** — claim extraction + independent re-verification against the data; per-claim flag. **This is the differentiator.** Test with planted false claims → judge must catch them.
 5. **App** — upload CSV → run agent → render report with inline `verified / unverified / contradicted` badges.
 6. **Write-up** — README framing it as "honest agentic analysis", with a demo run on the churn data showing caught vs verified claims.
