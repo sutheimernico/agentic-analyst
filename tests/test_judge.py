@@ -294,6 +294,45 @@ def test_claim_text_with_no_numeric_token_passes_through_silently(tmp_path):
     assert judged.verdict == "verified"
 
 
+def test_non_numeric_value_with_numeric_token_in_claim_stays_verified_and_does_not_crash(tmp_path):
+    # Regression for the `value_is_numeric` guard in verify_finding: the
+    # claim-text check must never run math.isclose against a categorical
+    # (string) value, even when the claim text itself contains a numeral
+    # ("55%") unrelated to the recomputed contract type. Without the guard
+    # this raises TypeError: must be real number, not str -- and no existing
+    # categorical test has a digit in its claim, so the suite would stay
+    # green if the guard were silently deleted.
+    finding = Finding(
+        claim="Month-to-month is the most common contract, held by 55% of customers.",
+        evidence_sql_or_code=(
+            "SELECT Contract FROM data GROUP BY Contract ORDER BY count(*) DESC LIMIT 1"
+        ),
+        value="Month-to-month",
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+    assert judged.recomputed_value == "Month-to-month"
+
+
+def test_bool_value_falls_through_to_string_compare_without_crashing(tmp_path):
+    # Optional corner case: validate_report rejects a bool `value` upstream,
+    # but verify_finding itself must not crash if one slips through via
+    # direct Finding construction. bool is a subclass of int, so the
+    # `value_is_numeric` guard must exclude it explicitly, mirroring
+    # `_compare`'s own `claimed_is_numeric` check.
+    finding = Finding(
+        claim="This claim mentions 42 in passing, but the value is a boolean.",
+        evidence_sql_or_code="print(True)",
+        value=True,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+
+
 # --- verify_baseline ------------------------------------------------------------
 
 
