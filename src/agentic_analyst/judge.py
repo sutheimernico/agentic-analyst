@@ -63,6 +63,89 @@ def _is_sql(evidence: str) -> bool:
     return bool(leading_word) and leading_word.group(0).upper() in _SQL_LEADING_KEYWORDS
 
 
+# --- evidence plausibility (REVIEW.md finding A-1, attacks 1+2) ---------------
+# `verify_finding` re-executes whatever evidence a Finding carries and trusts
+# the recomputed value against `finding.value` -- but nothing so far checked
+# that the evidence could have legitimately touched the real dataset at all.
+# `SELECT 0.75 AS churn_rate` (no FROM clause) or `print(0.90)` (no CSV read)
+# recompute to exactly their own literal, so they always "match" whatever
+# value is claimed next to them: a lie that carries its own proof. This is
+# the minimal deterministic version of the "witness allow-list" pattern
+# (require evidence to reference a registered source rather than a
+# free-floating literal; see research/2026-07-19-agentic-judge-sota.md
+# section 4). It does not parse SQL or Python -- it only checks that the
+# evidence's source text names the one legitimate data source it was given.
+
+_SQL_DATA_REFERENCE_RE = re.compile(r'\b(?:FROM|JOIN)\s+"?data"?\b', re.IGNORECASE)
+
+
+def _sql_evidence_touches_data(query: str) -> bool:
+    """True if `query` references the `data` view as a FROM/JOIN source.
+
+    Token-level, not a real SQL parser (this repo's evidence queries are the
+    simple single-statement SELECT/WITH forms tools.py's own
+    `_validate_single_select` already restricts them to -- this deliberately
+    does not duplicate that parsing). Requires `data` to appear immediately
+    after FROM or JOIN, not merely anywhere in the query text: `SELECT 0.75
+    AS data` contains the bare token `data` but never reads the view, so a
+    naive "does the token `data` appear anywhere" check would wrongly call it
+    legitimate (see
+    test_sql_evidence_aliasing_a_column_as_data_without_reading_the_view_is_unverified
+    in tests/test_judge.py). A `WITH cte AS (SELECT ... FROM data) SELECT
+    ... FROM cte` CTE still matches, because the search scans the whole
+    query text, not just its outermost FROM clause.
+
+    What this CANNOT distinguish: a query that legitimately has `FROM data`
+    but filters to a subpopulation the claim's text doesn't mention still
+    passes (REVIEW.md attack 4 -- see verify_finding's docstring). This only
+    answers "did the evidence at least read the real table", never "did it
+    read the right rows of it".
+    """
+    return bool(_SQL_DATA_REFERENCE_RE.search(query))
+
+
+def _python_evidence_touches_data(code: str, csv_path: Path) -> bool:
+    """True if `code`'s source text references the dataset's actual file
+    path.
+
+    Python evidence receives no injected "already-loaded dataframe" variable
+    -- `run_python` (tools.py) only sets cwd/env for the subprocess, nothing
+    dataset-specific. The only way legitimate evidence code can read the
+    real CSV is by embedding the literal path in something like
+    `pd.read_csv(csv_path)`, exactly as the agent's own system prompt hands
+    the model that path ("The dataset lives at: {csv_path}",
+    `agent.py.SYSTEM_PROMPT`) and as the baseline retraining templates in
+    `agent.py`/`judge.py` already do. A substring check on the evidence
+    source for that exact path string is therefore both the simplest and
+    (for this repo's single-CSV setup) sufficient signal that the code at
+    least NAMES the real file.
+
+    What this CANNOT distinguish: code that names the path but never
+    actually uses it (`pd.read_csv(csv_path); print(0.9)`) still passes --
+    the same static-precondition limitation the SQL check above documents,
+    not something a source-text check can close.
+    """
+    return str(csv_path) in code
+
+
+def _evidence_implausibility_reason(evidence: str, csv_path: Path) -> str | None:
+    """None if `evidence` could legitimately have touched the real dataset;
+    otherwise a human-readable reason it could not have."""
+    if _is_sql(evidence):
+        if _sql_evidence_touches_data(evidence):
+            return None
+        return (
+            "SQL evidence never references the `data` view in a FROM/JOIN clause "
+            "-- it cannot have queried the real dataset"
+        )
+    if _python_evidence_touches_data(evidence, csv_path):
+        return None
+    return (
+        f"Python evidence never references the dataset path ({csv_path}) "
+        "-- it cannot have loaded the real dataset"
+    )
+
+
 def _parse_number(raw: str) -> int | float | None:
     """Parse a recomputed value's text form as a number, or None if it isn't
     one (e.g. a categorical value like 'Month-to-month')."""
@@ -289,9 +372,42 @@ def verify_finding(
     """Re-execute `finding.evidence_sql_or_code` against the real data and
     compare the recomputed value to `finding.value`.
 
-    `unverified` covers every case where the evidence could not be executed
-    or no single comparable value could be extracted from it -- it is
-    distinct from `contradicted`, which means the evidence DID run and
+    Before executing anything, the evidence must pass a plausibility check
+    (REVIEW.md finding A-1, attacks 1+2): SQL evidence must reference the
+    `data` view in a FROM/JOIN clause; Python evidence must reference the
+    dataset's file path (see `_evidence_implausibility_reason`). Evidence
+    that fails this -- `SELECT 0.75 AS churn_rate` (no FROM at all),
+    `print(0.90)` (never reads the CSV) -- recomputes to exactly its own
+    literal and therefore always "matches" whatever value is claimed next to
+    it, a self-proving lie the value<->evidence compare below cannot see on
+    its own. This check runs BEFORE execution, deliberately: it is a static
+    precondition on the evidence's source text (same spirit as tools.py's
+    `_validate_single_select`, which also rejects a submission before DuckDB
+    ever runs it), so there is no reason to spend a subprocess/DuckDB
+    execution on evidence that could not have been legitimate regardless of
+    what it happens to print. Failing it returns `unverified`, not
+    `contradicted`, with reason `evidence_does_not_touch_data`: the evidence
+    didn't produce a disprovable number about the data at all, so "couldn't
+    legitimately check" is the honest verdict, not "checked and it's wrong".
+
+    KNOWN GAP THIS DOES NOT CLOSE (REVIEW.md attack 4, intentionally not
+    mechanically detectable): evidence that legitimately reads `FROM data`
+    but silently narrows the population -- e.g. filtering to
+    `Contract='Month-to-month'` while the claim's text says "ALL customers"
+    -- passes both this check and the value compare, because the recomputed
+    number is genuinely, correctly derived from a real (if differently
+    scoped) query against the real table. VeriGraph (arXiv 2606.16603) names
+    this failure class "executability can mask weak semantic transitions" --
+    see research/2026-07-19-agentic-judge-sota.md section 4. Closing it
+    would require comparing the claim text's stated population against the
+    query's actual filter predicates -- a semantic check this deterministic,
+    execution-based judge does not attempt (see
+    test_population_switch_evidence_is_a_documented_known_gap_still_verified
+    in tests/test_judge.py).
+
+    `unverified` also covers every case where the evidence could not be
+    executed or no single comparable value could be extracted from it -- it
+    is distinct from `contradicted`, which means the evidence DID run and
     produced a value, but that value disagrees with the claim.
 
     After a successful, value-matching recompute, `finding.claim`'s own text
@@ -314,6 +430,16 @@ def verify_finding(
     collapses; real disagreement is caught by rel_tol at 1%.
     """
     evidence = finding.evidence_sql_or_code
+
+    implausibility = _evidence_implausibility_reason(evidence, csv_path)
+    if implausibility is not None:
+        return JudgedFinding(
+            finding=finding,
+            verdict="unverified",
+            recomputed_value=None,
+            detail=f"evidence_does_not_touch_data: {implausibility}",
+        )
+
     if _is_sql(evidence):
         raw_value, error_detail = _extract_sql_value(evidence, csv_path)
     else:

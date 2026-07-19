@@ -18,6 +18,9 @@ TELCO_CSV = Path(__file__).resolve().parent.parent / "data" / "telco-customer-ch
 
 CHURN_RATE_QUERY = "SELECT avg(CASE WHEN Churn = 'Yes' THEN 1.0 ELSE 0 END) AS churn_rate FROM data"
 REAL_CHURN_RATE = 0.2654  # 1869 / 7043 -- known fact about this CSV (see test_tools.py)
+# Churn rate among Month-to-month customers only -- known fact about this CSV,
+# recomputed directly via duckdb for the attack-4 test below.
+REAL_MONTH_TO_MONTH_CHURN_RATE = 0.4270967741935484
 
 REAL_BASELINE_MODEL = "LogisticRegression(random_state=42, max_iter=1000)"
 REAL_BASELINE_FEATURES = ["tenure", "MonthlyCharges", "TotalCharges"]
@@ -182,7 +185,15 @@ def test_non_numeric_claim_contradicted_when_wrong(tmp_path):
 def test_python_evidence_last_stdout_line_is_the_value(tmp_path):
     finding = Finding(
         claim="2 + 2 is 4 (sanity check for the Python evidence convention).",
-        evidence_sql_or_code="print('some noise line')\nprint(2 + 2)",
+        # The `pd.read_csv(...)` line is not part of what this test is
+        # checking (that's the last-stdout-line extraction convention below)
+        # -- it's here only so this evidence passes the evidence-plausibility
+        # check (Task A2): Python evidence must reference the dataset's real
+        # path or it is rejected before extraction is even attempted.
+        evidence_sql_or_code=(
+            f"import pandas as pd\npd.read_csv({str(TELCO_CSV)!r})\n"
+            "print('some noise line')\nprint(2 + 2)"
+        ),
         value=4,
     )
 
@@ -196,7 +207,10 @@ def test_python_evidence_last_stdout_line_is_the_value(tmp_path):
 
 
 def test_tolerance_boundary_just_inside_verifies_just_outside_contradicts(tmp_path):
-    query = "SELECT 1000.0 AS v"  # constant -- isolates the tolerance math itself
+    # "FROM data LIMIT 1" is only here to satisfy the evidence-plausibility
+    # check (Task A2) -- it does not change the constant, which is what
+    # isolates the tolerance math itself from real-data variability.
+    query = "SELECT 1000.0 AS v FROM data LIMIT 1"
 
     just_inside = Finding(claim="approx 1000", evidence_sql_or_code=query, value=1009)  # 0.9% off
     just_outside = Finding(claim="approx 1000", evidence_sql_or_code=query, value=1011)  # 1.1% off
@@ -397,13 +411,153 @@ def test_bool_value_falls_through_to_string_compare_without_crashing(tmp_path):
     # `_compare`'s own `claimed_is_numeric` check.
     finding = Finding(
         claim="This claim mentions 42 in passing, but the value is a boolean.",
-        evidence_sql_or_code="print(True)",
+        # `pd.read_csv(...)` line: satisfies the evidence-plausibility check
+        # (Task A2), not part of what this test is about.
+        evidence_sql_or_code=f"import pandas as pd\npd.read_csv({str(TELCO_CSV)!r})\nprint(True)",
         value=True,
     )
 
     judged = verify_finding(finding, TELCO_CSV, tmp_path)
 
     assert judged.verdict == "verified"
+
+
+# --- verify_finding: evidence plausibility (REVIEW.md A-1, attacks 1+2+4) -----
+# The claim-text check above (Task A1) closes attack 3 (honest evidence,
+# honest value, lying claim text). It does nothing for evidence that never
+# touched the real dataset at all: `SELECT 0.75 AS churn_rate` (no FROM
+# clause) or `print(0.90)` (no CSV read) always recompute to exactly their
+# own literal, so they "match" whatever value is claimed next to them -- a
+# self-proving lie. These tests prove the judge now rejects evidence that
+# could not possibly have queried/read the real data, and pin the one attack
+# (4) that remains a documented, not mechanically closable, gap.
+
+
+def test_sql_evidence_that_never_touches_the_data_view_is_unverified(tmp_path):
+    # REVIEW.md A-1, attack 1: `SELECT 0.75 AS churn_rate` has no FROM clause
+    # at all -- it can't have queried anything -- yet it recomputes to
+    # exactly 0.75 and used to pass as `verified`.
+    finding = Finding(
+        claim="75% of customers churned.",
+        evidence_sql_or_code="SELECT 0.75 AS churn_rate",
+        value=0.75,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "unverified"
+    assert judged.recomputed_value is None
+    assert "evidence_does_not_touch_data" in judged.detail
+
+
+def test_sql_evidence_aliasing_a_column_as_data_without_reading_the_view_is_unverified(tmp_path):
+    # Guards the check's own design against the exact dodge REVIEW.md warns
+    # about: naming an *output* column/alias `data` instead of actually
+    # reading the view in a FROM/JOIN clause. A check that merely asked "does
+    # the token `data` appear anywhere in the query" would be fooled by this;
+    # the real check requires `data` to appear where a table reference
+    # belongs.
+    finding = Finding(
+        claim="75% of customers churned.",
+        evidence_sql_or_code="SELECT 0.75 AS data",
+        value=0.75,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "unverified"
+    assert "evidence_does_not_touch_data" in judged.detail
+
+
+def test_python_evidence_that_never_reads_the_dataset_is_unverified(tmp_path):
+    # REVIEW.md A-1, attack 2: `print(0.90)` never opens the CSV -- it can't
+    # have computed anything about the real data -- yet it recomputes to
+    # exactly 0.90 and used to pass as `verified`.
+    finding = Finding(
+        claim="90% of customers churned -- almost everyone leaves!",
+        evidence_sql_or_code="print(0.90)",
+        value=0.90,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "unverified"
+    assert judged.recomputed_value is None
+    assert "evidence_does_not_touch_data" in judged.detail
+
+
+def test_with_cte_evidence_referencing_data_is_still_verified(tmp_path):
+    # False-positive guard: a legitimate query.py's own single-statement
+    # convention allows a WITH-CTE whose FROM data reference sits inside the
+    # CTE body, not the outermost FROM. The plausibility check must not
+    # reject this shape.
+    finding = Finding(
+        claim="26.5% of customers churned.",
+        evidence_sql_or_code=(
+            "WITH churn_flags AS ("
+            "SELECT CASE WHEN Churn = 'Yes' THEN 1.0 ELSE 0.0 END AS flag FROM data"
+            ") SELECT avg(flag) AS churn_rate FROM churn_flags"
+        ),
+        value=REAL_CHURN_RATE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+    assert judged.recomputed_value == pytest.approx(REAL_CHURN_RATE, abs=1e-3)
+
+
+def test_python_evidence_reading_the_real_csv_path_is_still_verified(tmp_path):
+    # False-positive guard: legitimate Python evidence that actually loads
+    # the dataset via its real path must not be rejected.
+    finding = Finding(
+        claim="There are 7043 rows in the dataset.",
+        evidence_sql_or_code=(
+            f"import pandas as pd\ndf = pd.read_csv({str(TELCO_CSV)!r})\nprint(len(df))"
+        ),
+        value=7043,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+    assert judged.recomputed_value == 7043
+
+
+def test_population_switch_evidence_is_a_documented_known_gap_still_verified(tmp_path):
+    # REVIEW.md A-1, attack 4 -- KNOWN GAP, deliberately NOT fixed by the
+    # evidence-plausibility check above (see verify_finding's docstring).
+    # The evidence below is a completely legitimate, executable query
+    # against the real `data` view -- it genuinely computes the churn rate
+    # among Month-to-month customers. The claim text, however, describes the
+    # result as being about "ALL customers", silently switching the
+    # population the number is actually about. Both the plausibility check
+    # (it DOES reference `FROM data`) and the value<->evidence compare (the
+    # recomputed number DOES match the claimed value) pass -- there is
+    # nothing execution-based to catch here, because nothing about the
+    # execution is dishonest; only the claim's framing of the population is.
+    #
+    # This is exactly the failure VeriGraph (arXiv 2606.16603) names
+    # "executability can mask weak semantic transitions": see
+    # research/2026-07-19-agentic-judge-sota.md section 4. Mechanically
+    # closing this would require comparing the claim text's stated
+    # population ("ALL customers") against the query's actual WHERE
+    # predicates -- a semantic check well beyond what a deterministic,
+    # execution-based judge does. Documented here as a known limitation, not
+    # silently left undiscovered.
+    finding = Finding(
+        claim="42.7% of ALL customers churned.",
+        evidence_sql_or_code=(
+            "SELECT avg(CASE WHEN \"Churn\"='Yes' THEN 1.0 ELSE 0.0 END) AS churn_rate "
+            "FROM data WHERE \"Contract\"='Month-to-month'"
+        ),
+        value=REAL_MONTH_TO_MONTH_CHURN_RATE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"  # known gap -- see comment above
+    assert judged.recomputed_value == pytest.approx(REAL_MONTH_TO_MONTH_CHURN_RATE, abs=1e-6)
 
 
 # --- verify_baseline ------------------------------------------------------------
