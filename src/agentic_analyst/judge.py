@@ -165,25 +165,30 @@ def _compare(
 
 # Matches a numeral in a claim's free text: digits with optional thousands
 # separators and an optional decimal part, optionally followed by a percent
-# sign. Anchored on the mandatory leading digit, so it only ever matches at a
-# numeral's start position -- no spurious empty matches.
-_CLAIM_NUMBER_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(%)?")
+# marker -- either the `%` sign or the spelled-out word ("percent" / "per
+# cent", any casing). `per\s*cent\b` matches both spellings at once: with
+# zero whitespace it's exactly "percent"; the trailing `\b` stops it from
+# firing inside an unrelated word ("percentage", "per centimeter"). Anchored
+# on the mandatory leading digit, so it only ever matches at a numeral's
+# start position -- no spurious empty matches.
+_CLAIM_NUMBER_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(%|per\s*cent\b)?", re.IGNORECASE)
 
 
 def _claim_numbers(claim: str) -> list[float]:
     """Extract every numeral in `claim`'s free text as float candidates.
 
-    A `26.5%` token yields BOTH `26.5` and `0.265` as candidates, since a
-    Finding's `value` may be stored either way (a rate finding here typically
-    claims "26.5%" in text but carries `value=0.265`). Thousands separators
-    ("1,234") are stripped before parsing. Returns an empty list for a claim
-    with no numeral at all -- not every claim quotes its number, and the
-    caller must treat that as "nothing to check", not a mismatch.
+    A `26.5%` token (or "26.5 percent" / "26.5 per cent") yields BOTH `26.5`
+    and `0.265` as candidates, since a Finding's `value` may be stored either
+    way (a rate finding here typically claims "26.5%" in text but carries
+    `value=0.265`). Thousands separators ("1,234") are stripped before
+    parsing. Returns an empty list for a claim with no numeral at all -- not
+    every claim quotes its number, and the caller must treat that as
+    "nothing to check", not a mismatch.
     """
     candidates: list[float] = []
-    for digits, percent_sign in _CLAIM_NUMBER_RE.findall(claim):
+    for digits, percent_marker in _CLAIM_NUMBER_RE.findall(claim):
         number = float(digits.replace(",", ""))
-        if percent_sign:
+        if percent_marker:
             candidates.append(number)
             candidates.append(number / 100)
         else:
@@ -198,6 +203,22 @@ def _claim_agrees_with_value(claim: str, value: float, rel_tol: float, abs_tol: 
     Only ONE candidate needs to match, not all of them: a claim naming a
     year or an unrelated count that legitimately differs from `value` is
     exactly why this isn't an "every candidate must match" rule.
+
+    KNOWN LIMITATION (accepted, not a bug): this recognizes a claim that
+    quotes `value` literally or in %-form, but NOT one phrased as "count of
+    total" -- e.g. "1,869 of 7,043 customers churned" is just as honest as
+    "26.5% of customers churned" for the same finding (value=0.2654), but
+    neither 1869 nor 7043 is close to 0.2654, so it currently produces a
+    false `contradicted` (see
+    test_count_over_total_claim_is_a_known_false_positive_for_a_rate_finding
+    in tests/test_judge.py). This is deliberately not patched with a
+    magnitude/ratio-aware guard: any tolerance loose enough to accept
+    "1,869 of 7,043" as agreeing with 0.2654 would also have to accept some
+    genuinely wrong number related to `value` by other arithmetic, reopening
+    the hole this check exists to close (a lie like "7500% churned" must
+    keep failing). The real fix is a report-writing contract on the agent
+    side -- a claim must quote either `value` itself or its %-form -- not a
+    smarter comparison here.
     """
     candidates = _claim_numbers(claim)
     if not candidates:

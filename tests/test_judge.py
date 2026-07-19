@@ -294,6 +294,79 @@ def test_claim_text_with_no_numeric_token_passes_through_silently(tmp_path):
     assert judged.verdict == "verified"
 
 
+def test_claim_text_spelling_out_percent_matches_value_stays_verified(tmp_path):
+    # "percent" (no %-sign) must be recognized exactly like "%" -- previously
+    # only the symbol was, so this honest claim wrongly came back
+    # `contradicted` (26.5 vs 0.2654 with no %-candidate to try 0.265).
+    finding = Finding(
+        claim="26.5 percent of customers churned.",
+        evidence_sql_or_code=CHURN_RATE_QUERY,
+        value=REAL_CHURN_RATE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+
+
+def test_claim_text_spelling_out_per_cent_two_words_matches_value_stays_verified(tmp_path):
+    # The two-word spelling ("per cent") must be recognized too.
+    finding = Finding(
+        claim="26.5 per cent of customers churned.",
+        evidence_sql_or_code=CHURN_RATE_QUERY,
+        value=REAL_CHURN_RATE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+
+
+def test_claim_with_unrelated_decoy_number_next_to_correct_one_stays_verified(tmp_path):
+    # The docstring's own example: a claim naming a year alongside the
+    # correctly-quoted rate must still verify -- only ONE candidate has to
+    # match, so the decoy (2021) doesn't matter.
+    finding = Finding(
+        claim="In 2021, 26.5% of customers churned.",
+        evidence_sql_or_code=CHURN_RATE_QUERY,
+        value=REAL_CHURN_RATE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+
+
+def test_count_over_total_claim_is_a_known_false_positive_for_a_rate_finding(tmp_path):
+    # KNOWN LIMITATION, pinned deliberately (see _claim_agrees_with_value's
+    # docstring): "1,869 of 7,043 customers churned" is exactly as honest as
+    # "26.5% of customers churned" for this finding (1869/7043 == the real
+    # churn rate, value=0.2654) -- but the check only recognizes a claim that
+    # quotes `value` literally or in %-form, not a count-over-total phrasing.
+    # Neither 1869 nor 7043 is close to 0.2654 under any tolerance, so this
+    # currently -- and knowingly -- comes back `contradicted`.
+    #
+    # This is NOT patched with a magnitude/ratio-aware guard: a tolerance
+    # loose enough to accept "1,869 of 7,043" as agreeing with 0.2654 would
+    # also have to accept a genuinely wrong number related to `value` by some
+    # other arithmetic, reopening the hole this check exists to close (e.g. a
+    # planted "7500% churned" lie must keep failing). The real fix belongs in
+    # the agent's report-writing contract -- a claim must quote either
+    # `value` itself or its %-form -- not a smarter comparison in the judge.
+    # Must be listed in the README's "What the judge does NOT catch" section
+    # (tracked as a later task, not part of this one).
+    finding = Finding(
+        claim="1,869 of 7,043 customers churned.",
+        evidence_sql_or_code=CHURN_RATE_QUERY,
+        value=REAL_CHURN_RATE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "contradicted"  # known false positive, see comment above
+    assert "claim_text_disagrees_with_value" in judged.detail
+
+
 def test_non_numeric_value_with_numeric_token_in_claim_stays_verified_and_does_not_crash(tmp_path):
     # Regression for the `value_is_numeric` guard in verify_finding: the
     # claim-text check must never run math.isclose against a categorical
