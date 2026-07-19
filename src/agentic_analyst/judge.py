@@ -163,6 +163,48 @@ def _compare(
     )
 
 
+# Matches a numeral in a claim's free text: digits with optional thousands
+# separators and an optional decimal part, optionally followed by a percent
+# sign. Anchored on the mandatory leading digit, so it only ever matches at a
+# numeral's start position -- no spurious empty matches.
+_CLAIM_NUMBER_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(%)?")
+
+
+def _claim_numbers(claim: str) -> list[float]:
+    """Extract every numeral in `claim`'s free text as float candidates.
+
+    A `26.5%` token yields BOTH `26.5` and `0.265` as candidates, since a
+    Finding's `value` may be stored either way (a rate finding here typically
+    claims "26.5%" in text but carries `value=0.265`). Thousands separators
+    ("1,234") are stripped before parsing. Returns an empty list for a claim
+    with no numeral at all -- not every claim quotes its number, and the
+    caller must treat that as "nothing to check", not a mismatch.
+    """
+    candidates: list[float] = []
+    for digits, percent_sign in _CLAIM_NUMBER_RE.findall(claim):
+        number = float(digits.replace(",", ""))
+        if percent_sign:
+            candidates.append(number)
+            candidates.append(number / 100)
+        else:
+            candidates.append(number)
+    return candidates
+
+
+def _claim_agrees_with_value(claim: str, value: float, rel_tol: float, abs_tol: float) -> bool:
+    """True if at least one numeral parsed from `claim` matches `value`
+    within tolerance, or if `claim` quotes no numeral at all.
+
+    Only ONE candidate needs to match, not all of them: a claim naming a
+    year or an unrelated count that legitimately differs from `value` is
+    exactly why this isn't an "every candidate must match" rule.
+    """
+    candidates = _claim_numbers(claim)
+    if not candidates:
+        return True
+    return any(math.isclose(c, value, rel_tol=rel_tol, abs_tol=abs_tol) for c in candidates)
+
+
 @dataclass
 class JudgedFinding:
     finding: Finding
@@ -231,6 +273,17 @@ def verify_finding(
     distinct from `contradicted`, which means the evidence DID run and
     produced a value, but that value disagrees with the claim.
 
+    After a successful, value-matching recompute, `finding.claim`'s own text
+    is additionally checked for a disagreeing numeral (REVIEW.md finding A-1,
+    attack 3: honest evidence + honest `value`, but a claim sentence quoting
+    a different number -- e.g. "75% of customers churned" next to
+    `value=0.2654` -- used to pass as `verified` because nothing ever read
+    the sentence). A disagreement downgrades `verified` to `contradicted`
+    with reason `claim_text_disagrees_with_value`. This only ever
+    strengthens the verdict: it runs solely on the `verified` branch, so an
+    `unverified` or already-`contradicted` outcome is never masked or
+    weakened by it.
+
     Tolerances are tight on purpose. `math.isclose` passes if EITHER rel_tol
     OR abs_tol is satisfied, and the dominant claim type here is a rate /
     proportion in [0, 1]; a loose abs_tol (e.g. 0.5) would let almost any
@@ -255,6 +308,21 @@ def verify_finding(
     # between the extractors and _compare is checked, not just assumed.
     assert raw_value is not None
     verdict, recomputed_value, detail = _compare(finding.value, raw_value, rel_tol, abs_tol)
+
+    value_is_numeric = isinstance(finding.value, (int, float)) and not isinstance(
+        finding.value, bool
+    )
+    if (
+        verdict == "verified"
+        and value_is_numeric
+        and not _claim_agrees_with_value(finding.claim, finding.value, rel_tol, abs_tol)
+    ):
+        verdict = "contradicted"
+        detail = (
+            f"claim_text_disagrees_with_value: claim {finding.claim!r} quotes no number "
+            f"matching the claimed value {finding.value!r} (rel_tol={rel_tol}, abs_tol={abs_tol})"
+        )
+
     return JudgedFinding(
         finding=finding, verdict=verdict, recomputed_value=recomputed_value, detail=detail
     )

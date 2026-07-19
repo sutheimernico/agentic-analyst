@@ -55,6 +55,11 @@ def test_planted_false_churn_rate_claim_is_contradicted(tmp_path):
     assert judged.verdict == "contradicted"
     assert judged.finding.value == 0.90  # claim preserved for the report/UI
     assert judged.recomputed_value == pytest.approx(REAL_CHURN_RATE, abs=1e-3)
+    # This is already contradicted by the value<->evidence compare; the
+    # claim-text check (see below) must not also fire and overwrite the
+    # detail with its own reason -- the original mismatch explanation stays
+    # authoritative.
+    assert "claim_text_disagrees_with_value" not in judged.detail
 
 
 def test_moderate_proportion_lie_is_contradicted_under_default_tolerance(tmp_path):
@@ -201,6 +206,92 @@ def test_tolerance_boundary_just_inside_verifies_just_outside_contradicts(tmp_pa
 
     assert inside_result.verdict == "verified"
     assert outside_result.verdict == "contradicted"
+
+
+# --- verify_finding: claim text vs claimed value (REVIEW.md A-1, attack 3) -----
+# `_compare` above only checks value<->evidence consistency -- both fields are
+# agent-authored. The natural-language `claim` is the sentence a reader
+# actually trusts and was never read at all: a claim that lies in its text
+# while carrying an honest, evidence-matching `value` used to pass as
+# `verified`. These tests prove the judge now reads the claim text too.
+
+
+def test_claim_text_lying_about_percentage_is_contradicted_even_with_honest_value(tmp_path):
+    finding = Finding(
+        claim="75% of customers churned -- almost everyone leaves!",
+        evidence_sql_or_code=CHURN_RATE_QUERY,
+        value=REAL_CHURN_RATE,  # honest value, honest evidence -- only the claim text lies
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "contradicted"
+    assert judged.recomputed_value == pytest.approx(REAL_CHURN_RATE, abs=1e-3)
+    assert "claim_text_disagrees_with_value" in judged.detail
+
+
+def test_claim_text_quoting_the_correct_percentage_stays_verified(tmp_path):
+    finding = Finding(
+        claim="26.5% of customers churned.",
+        evidence_sql_or_code=CHURN_RATE_QUERY,
+        value=REAL_CHURN_RATE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path, rel_tol=0.01, abs_tol=0.01)
+
+    assert judged.verdict == "verified"
+
+
+def test_claim_text_quoting_a_plain_float_matching_value_stays_verified(tmp_path):
+    finding = Finding(
+        claim="The churn rate is 0.2654, which is a concerning figure.",
+        evidence_sql_or_code=CHURN_RATE_QUERY,
+        value=REAL_CHURN_RATE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+
+
+def test_claim_text_with_thousands_separator_matching_value_stays_verified(tmp_path):
+    finding = Finding(
+        claim="1,869 customers churned in total.",
+        evidence_sql_or_code="SELECT count(*) AS n FROM data WHERE Churn = 'Yes'",
+        value=1869,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+
+
+def test_claim_text_with_wrong_thousands_separator_count_is_contradicted(tmp_path):
+    finding = Finding(
+        claim="1,234 customers churned in total.",  # wrong count in the sentence
+        evidence_sql_or_code="SELECT count(*) AS n FROM data WHERE Churn = 'Yes'",
+        value=1869,  # honest value, honest evidence -- only the claim text lies
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "contradicted"
+    assert "claim_text_disagrees_with_value" in judged.detail
+
+
+def test_claim_text_with_no_numeric_token_passes_through_silently(tmp_path):
+    # Not every claim quotes its number -- a claim about *why* customers churn
+    # carries no numeral to check against the rate finding's value, so the new
+    # check must not interfere with the pre-existing verified verdict.
+    finding = Finding(
+        claim="Most customers who churn are on a month-to-month contract.",
+        evidence_sql_or_code=CHURN_RATE_QUERY,
+        value=REAL_CHURN_RATE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
 
 
 # --- verify_baseline ------------------------------------------------------------
