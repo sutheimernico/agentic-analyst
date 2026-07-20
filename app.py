@@ -7,12 +7,23 @@ see agent.py) run live against the real telco CSV, so every number on screen
 is computed by the real M1 tools, not invented. The real-Claude path
 (`AnthropicClient`) needs an API key -- Needs Nico.
 
-The sidebar "demo the judge" toggle plants one false claim (a DEMO ONLY
-overstated churn rate) via `inject_planted_false_claim` before re-judging, so
-the honest all-green report and the judge actually catching a lie are both
-visible from the same UI. `inject_planted_false_claim` is a plain function
-(not buried in a Streamlit callback) so it -- and the resulting contradicted
-verdict -- are directly unit-testable; see tests/test_app.py.
+The sidebar has two "demo the judge" toggles, each planting a different class
+of lie into the churn-rate finding before re-judging, so the honest all-green
+report and both of the judge's failure modes are visible from the same UI:
+- `inject_planted_false_claim` overstates the claim/value but leaves the
+  evidence honest -- the judge's recompute genuinely disagrees, so this comes
+  back `contradicted`.
+- `inject_consistent_lie` fabricates the claim, value, AND evidence together
+  (evidence that never reads the real data, e.g. `SELECT 0.75 AS
+  churn_rate`) -- a self-proving lie the value<->evidence compare alone
+  cannot see. The judge catches this a *different* way: the
+  evidence-plausibility precondition rejects it before ever comparing
+  values, so it comes back `unverified: evidence_does_not_touch_data`, not
+  `contradicted` -- see judge.py's `verify_finding` docstring and README's
+  "What the judge does NOT catch".
+
+Both are plain functions (not buried in a Streamlit callback) so they -- and
+the resulting verdicts -- are directly unit-testable; see tests/test_app.py.
 
 Run: uv run streamlit run app.py
 """
@@ -40,6 +51,21 @@ TAMPERED_VALUE = 0.75
 TAMPERED_CLAIM = (
     "[DEMO INJECTED LIE] 75% of customers churned -- almost everyone leaves! "
     "(planted for this demo; the judge below recomputes the real figure)"
+)
+
+# The second demo lie: fabricate the evidence too, not just the claim/value.
+# `CONSISTENT_LIE_EVIDENCE` never references the `data` view (no FROM clause
+# at all) -- REVIEW.md finding A-1, attack 1: evidence that recomputes to
+# exactly its own literal always "matches" whatever value is claimed next to
+# it, a lie that carries its own proof. `judge.py`'s evidence-plausibility
+# precondition (`_evidence_implausibility_reason`) is what catches this, not
+# the value comparison -- see `inject_consistent_lie` below.
+CONSISTENT_LIE_VALUE = 0.75
+CONSISTENT_LIE_EVIDENCE = "SELECT 0.75 AS churn_rate"
+CONSISTENT_LIE_CLAIM = (
+    "[DEMO INJECTED LIE, EVIDENCE FABRICATED TOO] 75% of customers churned -- "
+    "almost everyone leaves! (planted for this demo; even the evidence below "
+    "is fake -- it never reads the real data)"
 )
 
 STATUS_META: dict[str, tuple[str, str, str]] = {
@@ -74,6 +100,37 @@ def inject_planted_false_claim(report: Report) -> Report:
     return dataclasses.replace(report, findings=tampered_findings)
 
 
+def inject_consistent_lie(report: Report) -> Report:
+    """Return a copy of `report` with the churn-rate finding's claim, value,
+    AND evidence all fabricated together, for the second "demo the judge"
+    toggle.
+
+    Unlike `inject_planted_false_claim` (which keeps the real evidence and
+    only lies about `claim`/`value`, so the recompute genuinely disagrees --
+    `contradicted`), this plants a self-consistent lie: `CONSISTENT_LIE_
+    EVIDENCE` is `SELECT 0.75 AS churn_rate` -- no `FROM data` at all -- so
+    it recomputes to exactly its own literal and would "match" any value
+    claimed next to it. `verify_finding`'s value comparison alone cannot see
+    this; the judge instead catches it via the evidence-plausibility
+    precondition, returning `unverified: evidence_does_not_touch_data`
+    *before* any value is ever compared (see judge.py). Pure and
+    side-effect-free (uses `dataclasses.replace`, never mutates `report`),
+    mirroring `inject_planted_false_claim`.
+    """
+    tampered_findings = [
+        dataclasses.replace(
+            finding,
+            claim=CONSISTENT_LIE_CLAIM,
+            value=CONSISTENT_LIE_VALUE,
+            evidence_sql_or_code=CONSISTENT_LIE_EVIDENCE,
+        )
+        if finding.evidence_sql_or_code == CHURN_RATE_QUERY
+        else finding
+        for finding in report.findings
+    ]
+    return dataclasses.replace(report, findings=tampered_findings)
+
+
 @st.cache_data(show_spinner="Running the FakeLLM demo agent over the telco CSV...")
 def _run_demo_report() -> Report:
     with TemporaryDirectory(prefix="agentic-analyst-app-agent-") as tmp:
@@ -81,15 +138,24 @@ def _run_demo_report() -> Report:
 
 
 @st.cache_data(show_spinner="Judge is independently re-verifying every claim...")
-def get_judged_report(tamper: bool) -> tuple[Report, JudgedReport]:
+def get_judged_report(tamper: bool, consistent_lie: bool) -> tuple[Report, JudgedReport]:
     """Build the (report, judged_report) pair for the given toggle state.
 
-    Cached per `tamper` value so flipping the toggle back and forth in the
-    running app doesn't re-run the sandboxed subprocess pipeline (SQL
-    profiling + a fresh LogisticRegression retrain in the judge) every time.
+    If both toggles are on, `consistent_lie` wins: it fully overwrites the
+    same churn-rate finding `inject_planted_false_claim` would have touched,
+    so applying both in sequence would just silently discard whichever ran
+    first -- the sidebar documents this precedence rather than leaving it
+    implicit.
+
+    Cached per (tamper, consistent_lie) so flipping either toggle back and
+    forth in the running app doesn't re-run the sandboxed subprocess
+    pipeline (SQL profiling + a fresh LogisticRegression retrain in the
+    judge) every time.
     """
     report = _run_demo_report()
-    if tamper:
+    if consistent_lie:
+        report = inject_consistent_lie(report)
+    elif tamper:
         report = inject_planted_false_claim(report)
     with TemporaryDirectory(prefix="agentic-analyst-app-judge-") as tmp:
         judged = verify_report(report, CSV_PATH, Path(tmp))
@@ -187,9 +253,16 @@ def render_finding_card(judged_finding: JudgedFinding) -> None:
             unsafe_allow_html=True,
         )
     else:
+        # `unverified` (e.g. the consistent-lie toggle) legitimately has
+        # recomputed_value=None -- the module invariant judge.py documents
+        # ("unverified => recomputed_value is None"). Render that as "n/a",
+        # matching render_baseline_card's existing None-handling, not the
+        # literal string "None".
+        recomputed_value = judged_finding.recomputed_value
+        recomputed_display = recomputed_value if recomputed_value is not None else "n/a"
         st.markdown(
             f'<span style="color:{_INK_SECONDARY};">Claimed: <code>{finding.value}</code> '
-            f"&nbsp;&middot;&nbsp; Recomputed: <code>{judged_finding.recomputed_value}</code>"
+            f"&nbsp;&middot;&nbsp; Recomputed: <code>{recomputed_display}</code>"
             "</span>",
             unsafe_allow_html=True,
         )
@@ -233,7 +306,10 @@ def main() -> None:
     st.title("\U0001f50e Agentic Analyst")
     st.caption(
         "An LLM agent runs EDA + a baseline model on the telco churn dataset. "
-        "A judge layer independently recomputes and flags every claim -- that's the point."
+        "A judge layer recomputes every claim from its own evidence and flags "
+        "mismatches -- it catches a misreported number or evidence that never "
+        "touches the data, not a consistently fabricated result (see the two "
+        "demo toggles below)."
     )
     st.info(
         "**Demo mode:** this report comes from the deterministic `FakeLLM` agent "
@@ -249,11 +325,27 @@ def main() -> None:
             "\U0001f52c Inject a planted false claim (demo the judge)",
             value=False,
             help=(
-                "DEMONSTRATION ONLY. When on, overstates the churn-rate finding before "
-                "re-judging, so you can watch the judge catch it: a red 'contradicted' "
-                "badge with the claimed value next to the real recomputed one. The "
-                "planted claim is clearly labeled in the report as an injected demo lie "
-                "-- it is never presented as a real number."
+                "DEMONSTRATION ONLY. When on, overstates the churn-rate finding's claim "
+                "and value while leaving its evidence honest, so you can watch the judge "
+                "catch it: a red 'contradicted' badge with the claimed value next to the "
+                "real recomputed one. This demos ONE of the judge's two failure classes "
+                "-- see the second toggle below for the other. The planted claim is "
+                "clearly labeled in the report as an injected demo lie -- it is never "
+                "presented as a real number."
+            ),
+        )
+        consistent_lie = st.toggle(
+            "\U0001f52c Inject a *consistent* lie (evidence fabricated too)",
+            value=False,
+            help=(
+                "DEMONSTRATION ONLY. Fabricates the churn-rate finding's claim, value, "
+                "AND evidence together -- the evidence becomes `SELECT 0.75 AS "
+                "churn_rate`, which never reads the real data. The judge cannot catch "
+                "this by comparing values (the fake evidence always 'matches' whatever "
+                "is claimed next to it); it catches it a different way, by rejecting the "
+                "evidence itself BEFORE any value is compared: a yellow 'unverified' "
+                "badge with reason `evidence_does_not_touch_data`, not 'contradicted'. "
+                "Takes precedence over the toggle above if both are on."
             ),
         )
         st.divider()
@@ -269,9 +361,19 @@ def main() -> None:
             ),
         )
 
-    _report, judged = get_judged_report(tamper)
+    _report, judged = get_judged_report(tamper, consistent_lie)
 
-    if tamper:
+    if consistent_lie:
+        st.warning(
+            "\U0001f52c **Demo tamper active (consistent lie)** -- the churn-rate "
+            "finding's claim, value, AND evidence have all been fabricated together. "
+            "The judge flags it 'unverified: evidence_does_not_touch_data' below, not "
+            "'contradicted' -- it never claims to have disproven the number, only that "
+            "this evidence could not have legitimately produced any number about the "
+            "real data.",
+            icon="\U0001f52c",
+        )
+    elif tamper:
         st.warning(
             "\U0001f52c **Demo tamper active** -- the churn-rate finding below has been "
             "deliberately overstated to demonstrate the judge catching a lie. That "
