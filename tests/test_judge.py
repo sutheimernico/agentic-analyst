@@ -633,6 +633,36 @@ def test_baseline_with_nonexistent_feature_column_is_unverified(tmp_path):
     assert judged.recomputed_value is None
 
 
+# --- verify_baseline: tolerance boundary (REVIEW.md A-3) -----------------------
+# The retrain is fully deterministic (fixed seed, verified byte-identical
+# reproduction) -- there is no legitimate source of run-to-run variance to
+# excuse a loose tolerance. rel_tol=1e-6 is tight enough to catch REVIEW.md
+# A-3's exact attack (metric embellished 0.8105 -> 0.85, a 4.87% relative
+# lie that used to sail through the old rel_tol=0.05) while still absorbing
+# genuine float noise (a few ULPs, not a percentage point).
+
+
+def test_baseline_tolerance_boundary_matches_deterministic_recompute(tmp_path):
+    review_a3_lie = Baseline(
+        model=REAL_BASELINE_MODEL,
+        features=REAL_BASELINE_FEATURES,
+        metric_name="roc_auc",
+        metric_value=0.85,  # REVIEW.md A-3: embellished from the real 0.8105
+    )
+    float_noise = Baseline(
+        model=REAL_BASELINE_MODEL,
+        features=REAL_BASELINE_FEATURES,
+        metric_name="roc_auc",
+        metric_value=REAL_BASELINE_AUC + 1e-9,  # well inside float-noise epsilon
+    )
+
+    lie_result = verify_baseline(review_a3_lie, TELCO_CSV, tmp_path)
+    noise_result = verify_baseline(float_noise, TELCO_CSV, tmp_path)
+
+    assert lie_result.verdict == "contradicted"
+    assert noise_result.verdict == "verified"
+
+
 def test_baseline_metric_depends_on_feature_set(tmp_path):
     # Proves verify_baseline actually re-trains on the declared features rather
     # than echoing the claim: the real ~0.8105 AUC came from 3 features; a

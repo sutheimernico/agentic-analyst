@@ -17,18 +17,25 @@ scope / future work -- it would be a *weaker* verification method for a
 report this structured, and there is no second use case yet to justify the
 extra machinery (YAGNI).
 
-`verify_baseline` follows the same recompute-don't-trust principle, with one
-honest limitation: `Baseline` only records model description, features,
-metric name/value -- not the full training recipe (target definition, split
-strategy, preprocessing). The judge can only faithfully retrain the one
-recipe this project's agent uses (LogisticRegression, stratified 80/20 split
-on `Churn`, StandardScaler), parameterized by the report's declared features
-and the random_state/max_iter parsed out of `baseline.model`. A baseline it
-doesn't recognize is marked `unverified` with a clear reason -- never
-rubber-stamped. The retraining code below is deliberately NOT shared with
-agent.py's `BASELINE_CODE_TEMPLATE`: an independent check should not run the
-exact same code path that produced the number in the first place, or a bug
-in the original training code would go uncaught.
+`verify_baseline` follows the same recompute-don't-trust principle, but is
+honestly weaker than `verify_finding`: it retrains this project's declared
+recipe (LogisticRegression, stratified 80/20 split on `Churn`, TotalCharges
+blank->0.0, StandardScaler) in a fresh process, parameterized by the report's
+declared features and the random_state/max_iter parsed out of
+`baseline.model`. This DOES catch a *misreported* metric value -- a number
+that disagrees with what the declared recipe actually produces when run
+(REVIEW.md finding A-3; rel_tol is 1e-6 below, tight because the retrain is
+fully deterministic). It is explicitly NOT an independent methodology check:
+`_BASELINE_REPRO_TEMPLATE` below reproduces the exact same recipe as
+agent.py's `BASELINE_CODE_TEMPLATE` -- same fillna, same split strategy, same
+seed, same model -- so a methodological bug shared by both (e.g. a leakage
+mistake baked into the template itself) reproduces identically here and
+still passes as `verified` (REVIEW.md finding A-2). `Baseline` also only
+records model description, features, metric name/value -- not the full
+training recipe (target definition, split strategy, preprocessing) -- so the
+judge can only faithfully retrain the one recipe this project's agent uses.
+A baseline it doesn't recognize is marked `unverified` with a clear reason --
+never rubber-stamped.
 """
 
 from __future__ import annotations
@@ -551,7 +558,7 @@ def verify_baseline(
     baseline: Baseline,
     csv_path: Path,
     workdir: Path,
-    rel_tol: float = 0.05,
+    rel_tol: float = 1e-6,
 ) -> JudgedBaseline:
     """Re-train the baseline's model spec on its declared features and
     compare the recomputed metric to `baseline.metric_value`.
@@ -640,7 +647,7 @@ def verify_report(
     workdir: Path,
     rel_tol: float = 0.01,
     abs_tol: float = 0.01,
-    baseline_rel_tol: float = 0.05,
+    baseline_rel_tol: float = 1e-6,
 ) -> JudgedReport:
     """Verify every finding and the baseline in `report`, returning the full
     judged report plus a {verified, unverified, contradicted} summary."""
