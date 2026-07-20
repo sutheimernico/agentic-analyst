@@ -693,6 +693,37 @@ def test_baseline_abs_tol_floor_does_not_mask_a_sub_floor_embellishment(tmp_path
     assert noise_result.verdict == "verified"
 
 
+def test_baseline_rel_tol_is_the_dominant_bound_for_real_metric_values(tmp_path):
+    # Quality-review follow-up: with _BASELINE_ABS_TOL == rel_tol == 1e-6 (the
+    # prior state of this fix), abs_tol tied-or-won for every metric in [0, 1]
+    # (rel_tol*value <= rel_tol always), so the overridable rel_tol param was
+    # inert -- a private constant silently decided every verdict instead.
+    # _BASELINE_ABS_TOL is now a near-zero-only floor (~1e-9); rel_tol*value
+    # (~1e-6 * 0.8105 =~ 8.1e-7 here) is the bound that actually governs.
+    # diff=5e-7 sits below that rel_tol bound -> verified; diff=9e-7 sits just
+    # above it -> contradicted. Both diffs are comfortably above the abs_tol
+    # floor, so abs_tol cannot rescue either one -- this isolates rel_tol as
+    # the deciding bound.
+    within_rel_tol = Baseline(
+        model=REAL_BASELINE_MODEL,
+        features=REAL_BASELINE_FEATURES,
+        metric_name="roc_auc",
+        metric_value=REAL_BASELINE_AUC + 5e-7,
+    )
+    beyond_rel_tol = Baseline(
+        model=REAL_BASELINE_MODEL,
+        features=REAL_BASELINE_FEATURES,
+        metric_name="roc_auc",
+        metric_value=REAL_BASELINE_AUC + 9e-7,
+    )
+
+    within_result = verify_baseline(within_rel_tol, TELCO_CSV, tmp_path)
+    beyond_result = verify_baseline(beyond_rel_tol, TELCO_CSV, tmp_path)
+
+    assert within_result.verdict == "verified"
+    assert beyond_result.verdict == "contradicted"
+
+
 def test_baseline_metric_depends_on_feature_set(tmp_path):
     # Proves verify_baseline actually re-trains on the declared features rather
     # than echoing the claim: the real ~0.8105 AUC came from 3 features; a

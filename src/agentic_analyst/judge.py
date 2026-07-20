@@ -26,16 +26,18 @@ declared features and the random_state/max_iter parsed out of
 that disagrees with what the declared recipe actually produces when run
 (REVIEW.md finding A-3). The net comparison tolerance is `math.isclose`'s
 `max(rel_tol * max(|a|,|b|), abs_tol)`, i.e. whichever of the two bounds is
-looser for the pair being compared -- both are 1e-6 (`verify_baseline`'s
-`rel_tol` default and `_BASELINE_ABS_TOL`), so for this project's
-AUC/accuracy metrics (always in [0, 1], where `rel_tol * value` never
-exceeds `rel_tol` itself) `_BASELINE_ABS_TOL` is normally the binding bound.
-Both were tightened together deliberately: tightening only `rel_tol` (an
-earlier version of this fix) left the old, much looser `_BASELINE_ABS_TOL`
-as an unconditional floor that alone still let a metric embellished by
-~0.0095 (e.g. 0.82 claimed vs ~0.8105 actual) pass as `verified` -- see
-`_BASELINE_ABS_TOL`'s comment below for why it is 1e-6 and not 0. It is
-explicitly NOT an independent methodology check:
+looser for the pair being compared. `rel_tol` (`verify_baseline`'s default,
+1e-6) is the bound that actually governs for real AUC/accuracy metrics: it
+is a caller-overridable parameter, exactly like `verify_finding`'s rel_tol.
+`_BASELINE_ABS_TOL` is deliberately much tighter (~1e-9) so it only ever
+matters for a metric near 0, where `rel_tol * value` itself shrinks toward
+0 -- it is a near-zero-only floor, not a second general-purpose tolerance.
+An earlier version of this fix set both to 1e-6: for metrics bounded to
+[0, 1], `rel_tol * value` never exceeds `rel_tol`, so an equally-sized
+`_BASELINE_ABS_TOL` tied-or-won every comparison, silently making the
+overridable `rel_tol` param inert and a private constant the real decision
+-- see `_BASELINE_ABS_TOL`'s comment below for why it is ~1e-9 now, not 0.
+It is explicitly NOT an independent methodology check:
 `_BASELINE_REPRO_TEMPLATE` below reproduces the exact same recipe as
 agent.py's `BASELINE_CODE_TEMPLATE` -- same fillna, same split strategy, same
 seed, same model -- so a methodological bug shared by both (e.g. a leakage
@@ -505,18 +507,24 @@ _MAX_ITER_RE = re.compile(r"max_iter\s*=\s*(\d+)")
 _DEFAULT_MAX_ITER = 1000
 # math.isclose passes if EITHER bound below is satisfied:
 # abs(a-b) <= max(rel_tol * max(|a|,|b|), abs_tol). For a metric bounded to
-# [0, 1], rel_tol*value can never exceed abs_tol once abs_tol is non-trivial
-# -- so abs_tol alone ends up governing the ENTIRE comparison, and rel_tol's
-# tightness (see verify_baseline's rel_tol=1e-6 default) is moot unless
-# abs_tol is equally tight. This floor is NOT the loose, deliberately-wide
-# abs_tol used for findings of any magnitude -- it exists only to guard the
-# one case rel_tol structurally cannot: a metric near 0, where
-# rel_tol*max(|a|,|b|) itself shrinks toward 0, so abs_tol=0 would reject
-# genuine cross-platform float noise (different BLAS/sklearn builds
-# producing e.g. 1e-9 of drift) as a false "contradicted". 1e-6 absorbs
-# that drift while staying ~4 orders of magnitude below the smallest
-# embellishment this judge must still catch (REVIEW.md A-3's 0.0095 gap).
-_BASELINE_ABS_TOL = 1e-6
+# [0, 1], rel_tol*value can never exceed abs_tol once abs_tol is not itself
+# tiny -- an earlier version of this fix set _BASELINE_ABS_TOL to 1e-6 (same
+# as rel_tol), which meant abs_tol tied-or-won EVERY comparison and the
+# overridable rel_tol param was inert, decided instead by this private
+# constant (quality-review finding). _BASELINE_ABS_TOL is now ~1e-9 -- small
+# enough that rel_tol (see verify_baseline's rel_tol=1e-6 default) is the
+# bound that actually governs for any real metric value, restoring rel_tol
+# as a genuinely overridable, dominant tolerance (matching verify_finding's
+# design, where rel_tol/abs_tol are both real caller-facing knobs). This
+# floor is NOT the loose, deliberately-wide abs_tol used for findings of
+# any magnitude -- it exists only to guard the one case rel_tol structurally
+# cannot: a metric near 0, where rel_tol*max(|a|,|b|) itself shrinks toward
+# 0, so abs_tol=0 would reject genuine cross-platform float noise (different
+# BLAS/sklearn builds producing e.g. 1e-9 of drift) as a false
+# "contradicted". 1e-9 absorbs exactly that drift magnitude without being
+# anywhere near large enough to mask a real embellishment (REVIEW.md A-3's
+# smallest, 0.0095).
+_BASELINE_ABS_TOL = 1e-9
 
 _BASELINE_REPRO_TEMPLATE = """
 import json
@@ -647,7 +655,8 @@ def verify_baseline(
             recomputed_value=recomputed,
             detail=(
                 f"retrained {spec}: recomputed {baseline.metric_name}={recomputed:.4f} "
-                f"matches claimed {baseline.metric_value:.4f} (rel_tol={rel_tol})"
+                f"matches claimed {baseline.metric_value:.4f} "
+                f"(rel_tol={rel_tol}, abs_tol={_BASELINE_ABS_TOL})"
             ),
         )
     return JudgedBaseline(
@@ -656,7 +665,8 @@ def verify_baseline(
         recomputed_value=recomputed,
         detail=(
             f"retrained {spec}: recomputed {baseline.metric_name}={recomputed:.4f} "
-            f"does NOT match claimed {baseline.metric_value:.4f} (rel_tol={rel_tol})"
+            f"does NOT match claimed {baseline.metric_value:.4f} "
+            f"(rel_tol={rel_tol}, abs_tol={_BASELINE_ABS_TOL})"
         ),
     )
 
