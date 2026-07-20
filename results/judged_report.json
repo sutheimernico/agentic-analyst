@@ -11,7 +11,9 @@
       "claimed_value": 0.2654,
       "verdict": "verified",
       "recomputed_value": 0.2653698707936959,
-      "detail": "recomputed 0.2653698707936959 matches claimed 0.2654 (rel_tol=0.01, abs_tol=0.01)"
+      "detail": "recomputed 0.2653698707936959 matches claimed 0.2654 (rel_tol=0.01, abs_tol=0.01)",
+      "evidence_row_count": 7043,
+      "provenance_note": null
     },
     {
       "claim": "11 rows have a blank (whitespace-only) TotalCharges value -- these are the tenure-0 customers who have not been billed yet.",
@@ -19,7 +21,9 @@
       "claimed_value": 11,
       "verdict": "verified",
       "recomputed_value": 11,
-      "detail": "recomputed 11 matches claimed 11 (rel_tol=0.01, abs_tol=0.01)"
+      "detail": "recomputed 11 matches claimed 11 (rel_tol=0.01, abs_tol=0.01)",
+      "evidence_row_count": 7043,
+      "provenance_note": null
     }
   ],
   "baseline": {
@@ -33,7 +37,7 @@
     "claimed_value": 0.8105272675605157,
     "verdict": "verified",
     "recomputed_value": 0.8105272675605157,
-    "detail": "retrained LogisticRegression(random_state=42, max_iter=1000) on ['tenure', 'MonthlyCharges', 'TotalCharges']: recomputed roc_auc=0.8105 matches claimed 0.8105 (rel_tol=0.05)"
+    "detail": "retrained LogisticRegression(random_state=42, max_iter=1000) on ['tenure', 'MonthlyCharges', 'TotalCharges']: recomputed roc_auc=0.8105 matches claimed 0.8105 (rel_tol=1e-06, abs_tol=1e-09)"
   },
   "summary": {
     "verified": 3,
