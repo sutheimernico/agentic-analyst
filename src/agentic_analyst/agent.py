@@ -192,7 +192,13 @@ RUN_PYTHON_TOOL = {
         "`RESULT:` line, the judge falls back to treating the last "
         "non-blank stdout line as the value, so unlabelled bare-print "
         "output still works, but `RESULT:` is the reliable convention for "
-        "anything with decorated output."
+        "anything with decorated output. If the finding's value comes from "
+        "a filtered subset of the data, optionally also print the "
+        "population size on its own line as `ROWS: <n>`, e.g. "
+        "`print(f\"ROWS: {len(subset)}\")` -- the judge records this as "
+        "provenance metadata (e.g. 'this claim rests on 11 of 7,043 rows') "
+        "and it never affects the verdict; omit it if there is no "
+        "meaningful subset size to report."
     ),
     "input_schema": {
         "type": "object",

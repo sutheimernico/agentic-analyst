@@ -165,6 +165,154 @@ def _evidence_implausibility_reason(evidence: str, csv_path: Path) -> str | None
     )
 
 
+# --- population provenance (research/2026-07-19-agentic-judge-sota.md rec #5) -
+# The plausibility check above answers "did the evidence read the real
+# table at all"; it says nothing about HOW MUCH of it. `SELECT avg(x) FROM
+# data WHERE Contract='Month-to-month'` legitimately reads `data` but the
+# claim's number rests on a slice of it -- readers deserve to see that slice
+# size next to the claim ("this rests on 3,875 of 7,043 rows"), even though
+# a narrow population is not itself evidence of a lie (REVIEW.md attack 4
+# remains a documented, separate gap -- this does not close it, it only
+# surfaces the population size so a reader can judge for themselves).
+# `evidence_row_count`/`provenance_note` are therefore pure metadata: they
+# are computed independently of, and never feed back into, `verdict`.
+
+_NARROW_SUBSET_THRESHOLD = 0.10
+_TOTAL_ROWS_QUERY = "SELECT count(*) FROM data"
+
+
+def _total_row_count(csv_path: Path) -> int | None:
+    """The `data` view's total row count, recomputed directly from the CSV --
+    never trusted from the agent-authored `Report.dataset.rows` field (same
+    recompute-don't-trust principle as the rest of this module: a Dataset is
+    just as agent-authored as a Finding's `value`). Returns None if the
+    query can't be run at all; this is best-effort provenance metadata, not
+    something that should ever raise out of `verify_finding`.
+    """
+    result = query_sql(_TOTAL_ROWS_QUERY, csv_path)
+    if not result.ok:
+        return None
+    try:
+        return int(single_value(result.stdout))
+    except ValueError:
+        return None
+
+
+def _mask_parenthesized(text: str) -> str:
+    """Replace every character inside a parenthesized group -- including the
+    parens themselves -- with a space, preserving length and position.
+
+    Used by `_row_count_query` so a keyword search over the result only ever
+    matches a query's TOP-LEVEL SELECT/FROM, never one buried inside a CTE
+    body or subquery: `WITH cte AS (SELECT ... FROM data WHERE x) SELECT ...
+    FROM cte` masks the entire `(SELECT ... FROM data WHERE x)` span, so a
+    search for `FROM` after the outer `SELECT` finds `FROM cte`, not the
+    CTE's own `FROM data`.
+    """
+    masked = []
+    depth = 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+            masked.append(" ")
+        elif ch == ")":
+            depth = max(0, depth - 1)
+            masked.append(" ")
+        elif depth > 0:
+            masked.append(" ")
+        else:
+            masked.append(ch)
+    return "".join(masked)
+
+
+_TOP_LEVEL_SELECT_RE = re.compile(r"\bSELECT\b", re.IGNORECASE)
+_TOP_LEVEL_FROM_RE = re.compile(r"\bFROM\b", re.IGNORECASE)
+
+
+def _row_count_query(evidence: str) -> str | None:
+    """Build a companion query counting the rows an evidence SQL query's
+    source relation actually scanned.
+
+    The cheapest correct approach here is NOT to wrap the whole evidence as
+    a CTE and count ITS OWN output rows -- every finding's evidence in this
+    project reduces to a single value (`single_value`'s 1x1 contract), so
+    that would always return 1, telling us nothing. Instead this replaces
+    only the evidence's OUTERMOST select list (the span between its
+    top-level `SELECT` and top-level `FROM`) with `count(*)`, leaving every
+    CTE, FROM, JOIN, WHERE, GROUP BY, ORDER BY, and LIMIT clause
+    byte-for-byte unchanged:
+    `SELECT avg(x) FROM data WHERE Contract='Month-to-month'` becomes
+    `SELECT count(*) FROM data WHERE Contract='Month-to-month'`. A CTE that
+    itself filters (`WITH f AS (SELECT * FROM data WHERE tenure=0) SELECT
+    avg(x) FROM f`) becomes `... SELECT count(*) FROM f` -- correctly
+    counting through the CTE's own WHERE without this function ever having
+    to parse a WHERE clause out by hand.
+
+    Uses `_mask_parenthesized` so the SELECT/FROM search only ever matches
+    the outermost pair. Returns None if no top-level SELECT...FROM pair can
+    be found -- should not happen for evidence that already passed the
+    plausibility check above, but this is best-effort metadata, not worth a
+    crash if some future evidence shape defeats it.
+    """
+    body = evidence.strip()
+    if body.endswith(";"):
+        body = body[:-1]
+    masked = _mask_parenthesized(body)
+
+    select_match = _TOP_LEVEL_SELECT_RE.search(masked)
+    if select_match is None:
+        return None
+    from_match = _TOP_LEVEL_FROM_RE.search(masked, select_match.end())
+    if from_match is None:
+        return None
+
+    return body[: select_match.end()] + " count(*) " + body[from_match.start() :]
+
+
+def _sql_evidence_row_count(evidence: str, csv_path: Path) -> int | None:
+    """The number of rows the evidence query's source relation scanned (see
+    `_row_count_query`), or None if that can't be determined. Best-effort:
+    a companion-query failure (e.g. a WHERE clause this substitution kept
+    intact references a column that doesn't exist) yields None, never a
+    crash -- this is provenance metadata, not part of the verdict.
+    """
+    count_query = _row_count_query(evidence)
+    if count_query is None:
+        return None
+    result = query_sql(count_query, csv_path)
+    if not result.ok:
+        return None
+    try:
+        return int(single_value(result.stdout))
+    except ValueError:
+        return None
+
+
+def _provenance_note(evidence_row_count: int | None, total_rows: int | None) -> str | None:
+    """`"narrow_subset"` if `evidence_row_count` is under 10% of
+    `total_rows`, else None. Purely informational -- never changes
+    `verdict`. Also None (not a note) whenever either count is missing,
+    since the ratio can't be computed at all: an absent note must never be
+    misread as "checked and it's fine".
+    """
+    if evidence_row_count is None or total_rows is None or total_rows <= 0:
+        return None
+    if evidence_row_count / total_rows < _NARROW_SUBSET_THRESHOLD:
+        return "narrow_subset"
+    return None
+
+
+def _parse_row_count(raw: str) -> int | None:
+    """Parse a `ROWS:` sentinel's text form as a non-negative int, or None
+    if it isn't one -- malformed evidence (e.g. `ROWS: many`) degrades to
+    "no row count", not a crash; this is optional metadata."""
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
 def _parse_number(raw: str) -> int | float | None:
     """Parse a recomputed value's text form as a number, or None if it isn't
     one (e.g. a categorical value like 'Month-to-month')."""
@@ -196,10 +344,18 @@ def _extract_sql_value(evidence: str, csv_path: Path) -> tuple[str | None, str |
 
 
 _RESULT_SENTINEL_RE = re.compile(r"^RESULT:\s*(.*)$", re.IGNORECASE)
+# Second, independent sentinel (Task A5): the population size behind a
+# Python finding's recomputed value. Distinct label from RESULT: above, so
+# scanning for one never collides with the other -- a line matches at most
+# one of the two.
+_ROWS_SENTINEL_RE = re.compile(r"^ROWS:\s*(.*)$", re.IGNORECASE)
 
 
-def _extract_python_value(evidence: str, workdir: Path) -> tuple[str | None, str | None]:
-    """Run `evidence` via run_python and extract the recomputed value.
+def _extract_python_value(
+    evidence: str, workdir: Path
+) -> tuple[str | None, int | None, str | None]:
+    """Run `evidence` via run_python and extract the recomputed value and
+    (optionally) the population size behind it.
 
     Primary convention (Task A4; also documented for the agent itself in
     `agent.py`'s `RUN_PYTHON_TOOL` description, so this is a real contract
@@ -221,35 +377,50 @@ def _extract_python_value(evidence: str, workdir: Path) -> tuple[str | None, str
     test_python_evidence_multiple_disagreeing_result_lines_pins_last_one_wins
     in tests/test_judge.py). Disagreeing values across multiple `RESULT:`
     lines are NOT separately flagged in the verdict detail: doing so would
-    require widening this function's two-element (raw_value, error_detail)
-    return contract to carry a third, non-fatal warning distinct from
-    "extraction failed" -- deliberately not done for a case a well-formed
-    finding should never produce. Scanning by a distinct label also leaves
-    room for a second, independent sentinel (e.g. a future `ROWS: <n>`
-    line) without the two colliding.
+    require widening this function's return contract to carry a further
+    non-fatal warning distinct from "extraction failed" -- deliberately not
+    done for a case a well-formed finding should never produce.
+
+    Second, OPTIONAL sentinel (Task A5, population provenance -- SOTA rec
+    #5, research/2026-07-19-agentic-judge-sota.md): evidence code MAY also
+    print `ROWS: <n>` on its own line, the row count of whatever population
+    the recomputed value rests on (e.g. `print(f"ROWS: {len(subset)}")`).
+    Scanned the same way as `RESULT:` (every non-blank line, case-
+    insensitive, last match wins if more than one) -- proven independent by
+    using a distinct label, exactly as `RESULT:`'s docstring above
+    anticipated. Absent, `evidence_row_count` is None, never a guess: this
+    is optional metadata, not a hard requirement on evidence code.
 
     Fallback (legacy, pre-sentinel convention, kept for backwards
     compatibility): if no `RESULT:` line is found, the last non-blank stdout
-    line is treated as the value -- a bare number or short string, no
-    surrounding text. This mirrors the convention `agent.py`'s baseline
-    training code already uses (last stdout line = a JSON metrics blob);
-    for a single-value finding it was simplified to "last line = the
-    value" before the sentinel existed.
+    line NOT itself a `ROWS:` sentinel is treated as the value -- a bare
+    number or short string, no surrounding text. This mirrors the
+    convention `agent.py`'s baseline training code already uses (last
+    stdout line = a JSON metrics blob); for a single-value finding it was
+    simplified to "last line = the value" before the sentinel existed. The
+    `ROWS:` exclusion keeps this legacy fallback correct even if evidence
+    prints an optional `ROWS:` line last without ever adopting `RESULT:`.
 
-    Returns (raw_value, error_detail); error_detail is None on success.
+    Returns (raw_value, evidence_row_count, error_detail); error_detail is
+    None on success.
     """
     result = run_python(evidence, workdir)
     if not result.ok:
-        return None, f"run_python failed to execute evidence: {result.error}"
+        return None, None, f"run_python failed to execute evidence: {result.error}"
     lines = [ln.strip() for ln in result.stdout.strip().splitlines() if ln.strip()]
     if not lines:
-        return None, "run_python produced no stdout to extract a value from"
+        return None, None, "run_python produced no stdout to extract a value from"
+
+    rows_matches = [m.group(1).strip() for ln in lines if (m := _ROWS_SENTINEL_RE.match(ln))]
+    evidence_row_count = _parse_row_count(rows_matches[-1]) if rows_matches else None
 
     sentinel_matches = [m.group(1).strip() for ln in lines if (m := _RESULT_SENTINEL_RE.match(ln))]
     if sentinel_matches:
-        return sentinel_matches[-1], None
+        return sentinel_matches[-1], evidence_row_count, None
 
-    return lines[-1], None
+    fallback_lines = [ln for ln in lines if not _ROWS_SENTINEL_RE.match(ln)]
+    raw_value = fallback_lines[-1] if fallback_lines else lines[-1]
+    return raw_value, evidence_row_count, None
 
 
 def _compare(
@@ -370,6 +541,11 @@ class JudgedFinding:
     verdict: Verdict
     recomputed_value: str | int | float | None
     detail: str
+    # Population provenance (Task A5) -- pure metadata, never a verdict
+    # input; both default to None because they are only ever populated once
+    # `verify_finding` has actually touched real data (see its docstring).
+    evidence_row_count: int | None = None
+    provenance_note: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -379,6 +555,8 @@ class JudgedFinding:
             "verdict": self.verdict,
             "recomputed_value": self.recomputed_value,
             "detail": self.detail,
+            "evidence_row_count": self.evidence_row_count,
+            "provenance_note": self.provenance_note,
         }
 
 
@@ -460,6 +638,21 @@ def verify_finding(
     test_population_switch_evidence_is_a_documented_known_gap_still_verified
     in tests/test_judge.py).
 
+    Task A5 (population provenance, research/2026-07-19-agentic-judge-sota.md
+    rec #5) does not close that gap either -- it only surfaces the
+    population size so a reader can spot it themselves. Every returned
+    `JudgedFinding` additionally carries `evidence_row_count` (how many rows
+    of `data` the evidence's source relation actually scanned -- via a
+    companion SQL query for SQL evidence, or an optional `ROWS: <n>`
+    sentinel for Python evidence, `None` if that can't be determined) and
+    `provenance_note` (`"narrow_subset"` if that count is under 10% of the
+    total dataset, else `None`). Both are pure metadata: computed
+    independently of, and never feeding back into, `verdict` -- a lie built
+    on a narrow population still comes back `contradicted`, WITH the note
+    attached, not instead of it (see
+    test_narrow_subset_note_does_not_mask_a_contradicted_verdict in
+    tests/test_judge.py).
+
     `unverified` also covers every case where the evidence could not be
     executed or no single comparable value could be extracted from it -- it
     is distinct from `contradicted`, which means the evidence DID run and
@@ -498,13 +691,28 @@ def verify_finding(
     if _is_sql(evidence):
         extractor_name = _extract_sql_value.__name__
         raw_value, error_detail = _extract_sql_value(evidence, csv_path)
+        # A companion query, independent of whether the evidence's OWN
+        # query above succeeded (see _row_count_query's docstring: the
+        # substitution drops the original SELECT list, so a bad column
+        # referenced only there doesn't block this).
+        evidence_row_count = _sql_evidence_row_count(evidence, csv_path)
     else:
         extractor_name = _extract_python_value.__name__
-        raw_value, error_detail = _extract_python_value(evidence, workdir)
+        raw_value, evidence_row_count, error_detail = _extract_python_value(evidence, workdir)
+
+    # Total dataset size is the ratio's denominator -- only worth a query
+    # when there is a numerator to compare it against.
+    total_rows = _total_row_count(csv_path) if evidence_row_count is not None else None
+    provenance_note = _provenance_note(evidence_row_count, total_rows)
 
     if error_detail is not None:
         return JudgedFinding(
-            finding=finding, verdict="unverified", recomputed_value=None, detail=error_detail
+            finding=finding,
+            verdict="unverified",
+            recomputed_value=None,
+            detail=error_detail,
+            evidence_row_count=evidence_row_count,
+            provenance_note=provenance_note,
         )
 
     # On the success path an extractor always returns a raw value -- this is
@@ -537,7 +745,12 @@ def verify_finding(
         )
 
     return JudgedFinding(
-        finding=finding, verdict=verdict, recomputed_value=recomputed_value, detail=detail
+        finding=finding,
+        verdict=verdict,
+        recomputed_value=recomputed_value,
+        detail=detail,
+        evidence_row_count=evidence_row_count,
+        provenance_note=provenance_note,
     )
 
 

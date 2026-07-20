@@ -299,7 +299,7 @@ def test_broken_extractor_contract_raises_loud_value_error(tmp_path, monkeypatch
     # itself as "<lambda>" and this test would stop proving anything about
     # the real extractor's name appearing in the error.
     def _extract_python_value(evidence, workdir):
-        return (None, None)
+        return (None, None, None)
 
     monkeypatch.setattr(judge, "_extract_python_value", _extract_python_value)
     finding = Finding(
@@ -667,6 +667,130 @@ def test_population_switch_evidence_is_a_documented_known_gap_still_verified(tmp
 
     assert judged.verdict == "verified"  # known gap -- see comment above
     assert judged.recomputed_value == pytest.approx(REAL_MONTH_TO_MONTH_CHURN_RATE, abs=1e-6)
+
+
+# --- verify_finding: population provenance (Task A5, SOTA rec #5) -------------
+# `evidence_row_count` records how many rows of the `data` view actually fed
+# the recomputed value -- pure metadata, never a verdict input. A finding
+# whose evidence's population is under 10% of the full dataset additionally
+# gets `provenance_note = "narrow_subset"`, so a reader can see "this claim
+# rests on 11 of 7,043 rows" instead of trusting an unqualified aggregate.
+
+
+def test_sql_finding_over_the_whole_table_records_full_row_count(tmp_path):
+    finding = Finding(
+        claim="26.5% of customers churned.",
+        evidence_sql_or_code=CHURN_RATE_QUERY,  # no WHERE -- scans the whole table
+        value=REAL_CHURN_RATE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"  # this is metadata, not a verdict change
+    assert judged.evidence_row_count == 7043
+    assert judged.provenance_note is None  # 100% of the dataset -- not narrow
+
+
+def test_sql_finding_filtered_to_narrow_subset_gets_provenance_note(tmp_path):
+    # tenure=0 customers are the 11 (of 7043) rows that have never been
+    # billed yet -- 0.16% of the dataset, well under the 10% threshold.
+    finding = Finding(
+        claim="No tenure-0 customers have churned.",
+        evidence_sql_or_code=(
+            "SELECT avg(CASE WHEN Churn = 'Yes' THEN 1.0 ELSE 0 END) AS churn_rate "
+            "FROM data WHERE tenure = 0"
+        ),
+        value=0.0,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+    assert judged.evidence_row_count == 11
+    assert judged.provenance_note == "narrow_subset"
+
+
+def test_narrow_subset_note_does_not_mask_a_contradicted_verdict(tmp_path):
+    # Provenance is informational, never a verdict input in either direction:
+    # a lie built on a narrow population must still come back `contradicted`,
+    # WITH the narrow-subset note attached, not instead of it.
+    finding = Finding(
+        claim="90% of tenure-0 customers churned.",
+        evidence_sql_or_code=(
+            "SELECT avg(CASE WHEN Churn = 'Yes' THEN 1.0 ELSE 0 END) AS churn_rate "
+            "FROM data WHERE tenure = 0"
+        ),
+        value=0.90,  # planted lie: the real rate among tenure=0 customers is 0.0
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "contradicted"
+    assert judged.evidence_row_count == 11
+    assert judged.provenance_note == "narrow_subset"
+
+
+def test_sql_evidence_where_clause_inside_a_cte_is_still_counted_correctly(tmp_path):
+    # The population-counting query reuses the evidence's own CTE (and
+    # whatever WHERE it contains) rather than re-deriving the filter by hand
+    # -- proven here with a WHERE that lives inside the CTE body, not the
+    # outer query.
+    finding = Finding(
+        claim="No tenure-0 customers have churned.",
+        evidence_sql_or_code=(
+            "WITH tenure0 AS (SELECT * FROM data WHERE tenure = 0) "
+            "SELECT avg(CASE WHEN Churn = 'Yes' THEN 1.0 ELSE 0 END) AS churn_rate FROM tenure0"
+        ),
+        value=0.0,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+    assert judged.evidence_row_count == 11
+    assert judged.provenance_note == "narrow_subset"
+
+
+def test_python_evidence_rows_sentinel_is_recorded_as_evidence_row_count(tmp_path):
+    finding = Finding(
+        claim="No tenure-0 customers have churned.",
+        evidence_sql_or_code=(
+            f"import pandas as pd\n"
+            f"df = pd.read_csv({str(TELCO_CSV)!r})\n"
+            "subset = df[df['tenure'] == 0]\n"
+            "rate = (subset['Churn'] == 'Yes').mean()\n"
+            "print(f'RESULT: {rate:.4f}')\n"
+            "print(f'ROWS: {len(subset)}')\n"
+        ),
+        value=0.0,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+    assert judged.evidence_row_count == 11
+    assert judged.provenance_note == "narrow_subset"
+
+
+def test_python_evidence_without_rows_sentinel_leaves_evidence_row_count_none(tmp_path):
+    # ROWS: is an OPTIONAL second sentinel -- absent, evidence_row_count must
+    # be None (not 0, not a guess), and no provenance_note can be derived.
+    finding = Finding(
+        claim="26.5% of customers churned.",
+        evidence_sql_or_code=(
+            f"import pandas as pd\n"
+            f"df = pd.read_csv({str(TELCO_CSV)!r})\n"
+            "rate = (df['Churn'] == 'Yes').mean()\n"
+            "print(f'RESULT: {rate:.4f}')\n"
+        ),
+        value=REAL_CHURN_RATE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+    assert judged.evidence_row_count is None
+    assert judged.provenance_note is None
 
 
 # --- verify_baseline ------------------------------------------------------------
