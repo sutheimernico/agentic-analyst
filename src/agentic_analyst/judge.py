@@ -24,8 +24,18 @@ blank->0.0, StandardScaler) in a fresh process, parameterized by the report's
 declared features and the random_state/max_iter parsed out of
 `baseline.model`. This DOES catch a *misreported* metric value -- a number
 that disagrees with what the declared recipe actually produces when run
-(REVIEW.md finding A-3; rel_tol is 1e-6 below, tight because the retrain is
-fully deterministic). It is explicitly NOT an independent methodology check:
+(REVIEW.md finding A-3). The net comparison tolerance is `math.isclose`'s
+`max(rel_tol * max(|a|,|b|), abs_tol)`, i.e. whichever of the two bounds is
+looser for the pair being compared -- both are 1e-6 (`verify_baseline`'s
+`rel_tol` default and `_BASELINE_ABS_TOL`), so for this project's
+AUC/accuracy metrics (always in [0, 1], where `rel_tol * value` never
+exceeds `rel_tol` itself) `_BASELINE_ABS_TOL` is normally the binding bound.
+Both were tightened together deliberately: tightening only `rel_tol` (an
+earlier version of this fix) left the old, much looser `_BASELINE_ABS_TOL`
+as an unconditional floor that alone still let a metric embellished by
+~0.0095 (e.g. 0.82 claimed vs ~0.8105 actual) pass as `verified` -- see
+`_BASELINE_ABS_TOL`'s comment below for why it is 1e-6 and not 0. It is
+explicitly NOT an independent methodology check:
 `_BASELINE_REPRO_TEMPLATE` below reproduces the exact same recipe as
 agent.py's `BASELINE_CODE_TEMPLATE` -- same fillna, same split strategy, same
 seed, same model -- so a methodological bug shared by both (e.g. a leakage
@@ -493,10 +503,20 @@ _MODEL_CLASS_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 _RANDOM_STATE_RE = re.compile(r"random_state\s*=\s*(\d+)")
 _MAX_ITER_RE = re.compile(r"max_iter\s*=\s*(\d+)")
 _DEFAULT_MAX_ITER = 1000
-# Small floor so near-zero metric differences don't fall through a purely
-# relative tolerance; metrics here are bounded to [0, 1] so this is tight,
-# unlike the deliberately loose abs_tol used for findings of any magnitude.
-_BASELINE_ABS_TOL = 0.01
+# math.isclose passes if EITHER bound below is satisfied:
+# abs(a-b) <= max(rel_tol * max(|a|,|b|), abs_tol). For a metric bounded to
+# [0, 1], rel_tol*value can never exceed abs_tol once abs_tol is non-trivial
+# -- so abs_tol alone ends up governing the ENTIRE comparison, and rel_tol's
+# tightness (see verify_baseline's rel_tol=1e-6 default) is moot unless
+# abs_tol is equally tight. This floor is NOT the loose, deliberately-wide
+# abs_tol used for findings of any magnitude -- it exists only to guard the
+# one case rel_tol structurally cannot: a metric near 0, where
+# rel_tol*max(|a|,|b|) itself shrinks toward 0, so abs_tol=0 would reject
+# genuine cross-platform float noise (different BLAS/sklearn builds
+# producing e.g. 1e-9 of drift) as a false "contradicted". 1e-6 absorbs
+# that drift while staying ~4 orders of magnitude below the smallest
+# embellishment this judge must still catch (REVIEW.md A-3's 0.0095 gap).
+_BASELINE_ABS_TOL = 1e-6
 
 _BASELINE_REPRO_TEMPLATE = """
 import json

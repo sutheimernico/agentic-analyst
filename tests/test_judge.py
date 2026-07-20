@@ -636,10 +636,11 @@ def test_baseline_with_nonexistent_feature_column_is_unverified(tmp_path):
 # --- verify_baseline: tolerance boundary (REVIEW.md A-3) -----------------------
 # The retrain is fully deterministic (fixed seed, verified byte-identical
 # reproduction) -- there is no legitimate source of run-to-run variance to
-# excuse a loose tolerance. rel_tol=1e-6 is tight enough to catch REVIEW.md
-# A-3's exact attack (metric embellished 0.8105 -> 0.85, a 4.87% relative
-# lie that used to sail through the old rel_tol=0.05) while still absorbing
-# genuine float noise (a few ULPs, not a percentage point).
+# excuse a loose tolerance. This first case is caught by tightening rel_tol
+# alone (0.85 vs the real ~0.8105 is a 4.87% relative gap, comfortably above
+# even the OLD abs_tol=0.01 floor); the next test below pins the case
+# rel_tol alone does NOT fix -- a smaller embellishment that used to hide
+# under that floor.
 
 
 def test_baseline_tolerance_boundary_matches_deterministic_recompute(tmp_path):
@@ -657,6 +658,35 @@ def test_baseline_tolerance_boundary_matches_deterministic_recompute(tmp_path):
     )
 
     lie_result = verify_baseline(review_a3_lie, TELCO_CSV, tmp_path)
+    noise_result = verify_baseline(float_noise, TELCO_CSV, tmp_path)
+
+    assert lie_result.verdict == "contradicted"
+    assert noise_result.verdict == "verified"
+
+
+def test_baseline_abs_tol_floor_does_not_mask_a_sub_floor_embellishment(tmp_path):
+    # Regression: tightening rel_tol alone (see the test above) is not
+    # sufficient. `_BASELINE_ABS_TOL` is an unconditional floor in
+    # math.isclose's max(rel_tol*value, abs_tol) -- for a metric bounded to
+    # [0, 1], rel_tol*value can never exceed abs_tol once abs_tol is
+    # non-trivial, so abs_tol alone governs the comparison. A metric
+    # embellished from the real ~0.8105 to 0.82 (diff ~0.0095) sits just
+    # under the old abs_tol=0.01 floor and used to pass as "verified" even
+    # with rel_tol=1e-6 -- this is the exact gap the spec review flagged.
+    sub_floor_lie = Baseline(
+        model=REAL_BASELINE_MODEL,
+        features=REAL_BASELINE_FEATURES,
+        metric_name="roc_auc",
+        metric_value=0.82,  # diff from REAL_BASELINE_AUC ~0.0095 -- below the old 0.01 floor
+    )
+    float_noise = Baseline(
+        model=REAL_BASELINE_MODEL,
+        features=REAL_BASELINE_FEATURES,
+        metric_name="roc_auc",
+        metric_value=REAL_BASELINE_AUC + 1e-9,  # genuine float-noise scale
+    )
+
+    lie_result = verify_baseline(sub_floor_lie, TELCO_CSV, tmp_path)
     noise_result = verify_baseline(float_noise, TELCO_CSV, tmp_path)
 
     assert lie_result.verdict == "contradicted"
