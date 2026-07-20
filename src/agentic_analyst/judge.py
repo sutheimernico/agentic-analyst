@@ -195,25 +195,47 @@ def _extract_sql_value(evidence: str, csv_path: Path) -> tuple[str | None, str |
         return None, f"could not extract a single value from the query result: {exc}"
 
 
+_RESULT_SENTINEL_RE = re.compile(r"^RESULT:\s*(.*)$")
+
+
 def _extract_python_value(evidence: str, workdir: Path) -> tuple[str | None, str | None]:
     """Run `evidence` via run_python and extract the recomputed value.
 
-    Convention (documented here since there is no structured return value
-    for Python evidence): the code must print the single recomputed value
-    as the last non-blank stdout line -- a bare number or short string, no
+    Primary convention (Task A4; also documented for the agent itself in
+    `agent.py`'s `RUN_PYTHON_TOOL` description, so this is a real contract
+    between agent and judge rather than judge-internal folklore): evidence
+    code should print the recomputed value on its own line in the exact
+    form `RESULT: <value>`. Every non-blank stdout line is scanned for that
+    sentinel (not just the last one) so decorated output -- labels,
+    intermediate diagnostics, a trailing "done." -- printed before OR after
+    the sentinel line doesn't break extraction; if more than one `RESULT:`
+    line is present (which a well-behaved finding should never emit), the
+    last one wins, mirroring the fallback's own "last line" tie-break.
+    Scanning by a distinct label also leaves room for a second, independent
+    sentinel (e.g. a future `ROWS: <n>` line) without the two colliding.
+
+    Fallback (legacy, pre-sentinel convention, kept for backwards
+    compatibility): if no `RESULT:` line is found, the last non-blank stdout
+    line is treated as the value -- a bare number or short string, no
     surrounding text. This mirrors the convention `agent.py`'s baseline
     training code already uses (last stdout line = a JSON metrics blob);
-    for a single-value finding it is simplified to "last line = the value".
+    for a single-value finding it was simplified to "last line = the
+    value" before the sentinel existed.
 
     Returns (raw_value, error_detail); error_detail is None on success.
     """
     result = run_python(evidence, workdir)
     if not result.ok:
         return None, f"run_python failed to execute evidence: {result.error}"
-    lines = [ln for ln in result.stdout.strip().splitlines() if ln.strip()]
+    lines = [ln.strip() for ln in result.stdout.strip().splitlines() if ln.strip()]
     if not lines:
         return None, "run_python produced no stdout to extract a value from"
-    return lines[-1].strip(), None
+
+    sentinel_matches = [m.group(1).strip() for ln in lines if (m := _RESULT_SENTINEL_RE.match(ln))]
+    if sentinel_matches:
+        return sentinel_matches[-1], None
+
+    return lines[-1], None
 
 
 def _compare(
@@ -460,8 +482,10 @@ def verify_finding(
         )
 
     if _is_sql(evidence):
+        extractor_name = "_extract_sql_value"
         raw_value, error_detail = _extract_sql_value(evidence, csv_path)
     else:
+        extractor_name = "_extract_python_value"
         raw_value, error_detail = _extract_python_value(evidence, workdir)
 
     if error_detail is not None:
@@ -469,10 +493,19 @@ def verify_finding(
             finding=finding, verdict="unverified", recomputed_value=None, detail=error_detail
         )
 
-    # On the success path an extractor always returns a raw value; assert it
-    # so the implicit "error_detail is None => raw_value is not None" contract
-    # between the extractors and _compare is checked, not just assumed.
-    assert raw_value is not None
+    # On the success path an extractor always returns a raw value -- this is
+    # an implicit contract between the extractors and _compare
+    # ("error_detail is None => raw_value is not None"), not something a real
+    # evidence string can violate through normal execution. A bare `assert`
+    # here used to surface a broken contract as an undiagnosable
+    # AssertionError (and would vanish entirely under `python -O`); raise a
+    # loud, specific ValueError instead so a future extractor bug is
+    # immediately traceable to which extractor and which evidence broke it.
+    if raw_value is None:
+        raise ValueError(
+            f"{extractor_name} reported success (error_detail=None) but returned no "
+            f"raw_value -- extractor/comparator contract broken for evidence: {evidence[:200]!r}"
+        )
     verdict, recomputed_value, detail = _compare(finding.value, raw_value, rel_tol, abs_tol)
 
     value_is_numeric = isinstance(finding.value, (int, float)) and not isinstance(

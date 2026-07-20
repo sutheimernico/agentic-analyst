@@ -182,7 +182,16 @@ RUN_PYTHON_TOOL = {
         "scikit-learn are available). Use this for statistics beyond what "
         "SQL can express, and to train and evaluate the churn baseline "
         "model. Read the CSV from the exact path given in the system "
-        "prompt -- there is no network access."
+        "prompt -- there is no network access. When this code is a "
+        "finding's evidence (the code a separate judge process will "
+        "re-execute to check the finding's claimed value), print the "
+        "recomputed value on its own line in the exact form `RESULT: "
+        "<value>` -- other print statements (labels, intermediate "
+        "diagnostics) are fine anywhere around it. Without a `RESULT:` "
+        "line, the judge falls back to treating the last non-blank stdout "
+        "line as the value, so unlabelled bare-print output still works, "
+        "but `RESULT:` is the reliable convention for anything with "
+        "decorated output."
     ),
     "input_schema": {
         "type": "object",

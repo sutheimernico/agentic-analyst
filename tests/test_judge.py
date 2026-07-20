@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from agentic_analyst import judge
 from agentic_analyst.judge import verify_baseline, verify_finding, verify_report
 from agentic_analyst.report import Baseline, Dataset, Finding, Report
 
@@ -201,6 +202,53 @@ def test_python_evidence_last_stdout_line_is_the_value(tmp_path):
 
     assert judged.verdict == "verified"
     assert judged.recomputed_value == 4
+
+
+def test_python_evidence_result_sentinel_is_extracted_from_decorated_stdout(tmp_path):
+    # Task A4: a `RESULT: <value>` line is the structured sentinel now
+    # documented as the real contract (see RUN_PYTHON_TOOL's description in
+    # agent.py and _extract_python_value's docstring) -- evidence code may
+    # print explanatory text around the value as long as it also emits this
+    # line. Proven here by printing a decorated noise line AFTER the
+    # sentinel too: a naive "last non-blank line is the value" extractor
+    # would wrongly return "done." instead of the real churn rate.
+    finding = Finding(
+        claim="26.5% of customers churned.",
+        evidence_sql_or_code=(
+            f"import pandas as pd\n"
+            f"df = pd.read_csv({str(TELCO_CSV)!r})\n"
+            "rate = (df['Churn'] == 'Yes').mean()\n"
+            "print('the rate is:')\n"
+            "print(f'RESULT: {rate:.4f}')\n"
+            "print('done.')\n"
+        ),
+        value=REAL_CHURN_RATE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+    assert judged.recomputed_value == pytest.approx(REAL_CHURN_RATE, abs=1e-3)
+
+
+def test_broken_extractor_contract_raises_loud_value_error(tmp_path, monkeypatch):
+    # Regression guard for the bare `assert raw_value is not None` this task
+    # replaced (REVIEW.md A-4): if an extractor ever reports success
+    # (error_detail=None) but returns no raw_value -- an internal contract
+    # break that no real evidence string can trigger through normal
+    # execution -- the failure must be a loud, diagnosable ValueError naming
+    # the extractor and the evidence, not a bare AssertionError with no
+    # context (and one that silently vanishes if Python is ever run with
+    # -O, which strips asserts).
+    monkeypatch.setattr(judge, "_extract_python_value", lambda evidence, workdir: (None, None))
+    finding = Finding(
+        claim="broken extractor contract regression guard.",
+        evidence_sql_or_code=f"import pandas as pd\npd.read_csv({str(TELCO_CSV)!r})\nprint(1)",
+        value=1,
+    )
+
+    with pytest.raises(ValueError, match="_extract_python_value"):
+        verify_finding(finding, TELCO_CSV, tmp_path)
 
 
 # --- verify_finding: tolerance boundary ----------------------------------------
