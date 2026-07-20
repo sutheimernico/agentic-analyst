@@ -1,10 +1,13 @@
-"""Tests for the report UI (M5).
+"""Tests for the report UI (M5, extended in Task A6).
 
-`inject_planted_false_claim` is tested directly as a pure function (no
-Streamlit involved) since that -- and the judge actually catching what it
-plants -- is the milestone-critical behavior. `streamlit.testing.v1.AppTest`
-then smoke-tests the full app in both toggle states, including checking that
-the tampered state's rendered output contains a "contradicted" verdict.
+`inject_planted_false_claim`, `inject_consistent_lie`, and
+`_provenance_caption_html` are tested directly as pure functions (no
+Streamlit involved) since that -- and the judge actually catching what each
+lie plants -- is the milestone-critical behavior.
+`streamlit.testing.v1.AppTest` then smoke-tests the full app across both
+toggle states and the honest state, including checking that each tampered
+state's rendered output contains the verdict it's supposed to demonstrate
+("contradicted" for the first toggle, "unverified" for the second).
 """
 
 from pathlib import Path
@@ -21,6 +24,7 @@ from app import (
     CONSISTENT_LIE_VALUE,
     CSV_PATH,
     TAMPERED_VALUE,
+    _provenance_caption_html,
     inject_consistent_lie,
     inject_planted_false_claim,
 )
@@ -153,3 +157,42 @@ def test_app_second_toggle_shows_unverified_verdict_without_exception():
     rendered = "\n".join(el.value for el in at.markdown)
     assert "unverified" in rendered.lower()
     assert "none" not in rendered.lower()  # the recomputed_value=None display fix
+
+
+def test_app_honest_report_shows_provenance_caption_for_full_table_findings():
+    # Both honest demo findings scan the whole table (no WHERE clause), so
+    # the provenance caption should surface the full row count without the
+    # narrow-subset warning.
+    at = AppTest.from_file(str(APP_PATH))
+    at.run(timeout=120)
+
+    assert not at.exception
+    rendered = "\n".join(el.value for el in at.markdown)
+    assert "evidence touched 7043" in rendered.lower()
+    assert "narrow subset" not in rendered.lower()
+
+
+# --- _provenance_caption_html: pure function, no Streamlit --------------------
+
+
+def test_provenance_caption_shows_row_count_for_full_table_evidence():
+    html = _provenance_caption_html(evidence_row_count=7043, total_rows=7043, provenance_note=None)
+
+    assert "7043" in html
+    assert "narrow" not in html.lower()
+
+
+def test_provenance_caption_omits_denominator_when_total_rows_unknown():
+    html = _provenance_caption_html(evidence_row_count=500, total_rows=None, provenance_note=None)
+
+    assert "Evidence touched 500 rows." in html
+    assert " of " not in html
+
+
+def test_provenance_caption_flags_narrow_subset_without_becoming_a_verdict():
+    html = _provenance_caption_html(
+        evidence_row_count=500, total_rows=7043, provenance_note="narrow_subset"
+    )
+
+    assert "500 of 7043" in html
+    assert "narrow subset" in html.lower()

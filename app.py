@@ -240,7 +240,32 @@ def render_summary(summary: dict[str, int]) -> None:
         )
 
 
-def render_finding_card(judged_finding: JudgedFinding) -> None:
+def _provenance_caption_html(
+    evidence_row_count: int, total_rows: int | None, provenance_note: str | None
+) -> str:
+    """Render the population-provenance line for a finding card (Task A5's
+    `evidence_row_count`/`provenance_note` -- pure metadata, computed
+    independently of `verdict`, see judge.py). Ordinary (non-narrow)
+    provenance is a plain, muted caption: "this claim rests on N of M rows".
+    `provenance_note == "narrow_subset"` gets the same amber accent color as
+    the `unverified` badge (not a loud st.warning box) -- a nudge to read the
+    claim's wording against the population size, not a verdict downgrade;
+    a narrow subset is not itself evidence of a lie (REVIEW.md attack 4
+    remains a documented, separate gap -- this only surfaces the number).
+    """
+    ratio = f" of {total_rows}" if total_rows is not None else ""
+    text = f"Evidence touched {evidence_row_count}{ratio} rows."
+    if provenance_note != "narrow_subset":
+        return f'<span style="color:{_INK_SECONDARY};font-size:0.85rem;">{text}</span>'
+    text += (
+        " Narrow subset (<10% of the dataset) -- read the claim's wording "
+        "against this population."
+    )
+    narrow_color = STATUS_META["unverified"][0]
+    return f'<span style="color:{narrow_color};font-size:0.85rem;">⚠️ {text}</span>'
+
+
+def render_finding_card(judged_finding: JudgedFinding, total_rows: int | None = None) -> None:
     finding = judged_finding.finding
     st.markdown(f"**Claim:** {finding.claim}")
     st.code(finding.evidence_sql_or_code, language=_evidence_language(finding.evidence_sql_or_code))
@@ -267,6 +292,14 @@ def render_finding_card(judged_finding: JudgedFinding) -> None:
             unsafe_allow_html=True,
         )
     st.caption(judged_finding.detail)
+
+    if judged_finding.evidence_row_count is not None:
+        st.markdown(
+            _provenance_caption_html(
+                judged_finding.evidence_row_count, total_rows, judged_finding.provenance_note
+            ),
+            unsafe_allow_html=True,
+        )
 
 
 def render_baseline_card(judged_baseline: JudgedBaseline) -> None:
@@ -390,7 +423,7 @@ def main() -> None:
     st.subheader("Findings")
     for judged_finding in judged.findings:
         with st.container(border=True):
-            render_finding_card(judged_finding)
+            render_finding_card(judged_finding, judged.dataset.rows)
 
     st.subheader("Baseline")
     with st.container(border=True):
