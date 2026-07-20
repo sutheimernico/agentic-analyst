@@ -25,6 +25,7 @@ from app import (
     CSV_PATH,
     TAMPERED_VALUE,
     _provenance_caption_html,
+    get_judged_report,
     inject_consistent_lie,
     inject_planted_false_claim,
 )
@@ -122,6 +123,25 @@ def test_consistent_lie_is_caught_as_unverified_not_contradicted(honest_report):
     assert judged.summary["unverified"] >= 1
 
 
+# --- get_judged_report: both toggles on -----------------------------------------
+
+
+def test_get_judged_report_both_toggles_on_picks_consistent_lie_not_planted_claim():
+    # get_judged_report's docstring documents that consistent_lie wins if both
+    # toggles are on -- this is the only test exercising that precedence
+    # branch directly (the two toggle-specific tests above each pass exactly
+    # one flag). Asserting `unverified`/`evidence_does_not_touch_data` (not
+    # `contradicted`) is what actually distinguishes "consistent_lie wins"
+    # from "tamper wins" or "last-applied wins": inject_planted_false_claim
+    # alone would produce a `contradicted` verdict on this same finding.
+    _report, judged = get_judged_report(tamper=True, consistent_lie=True)
+
+    churn_judged = next(jf for jf in judged.findings if jf.finding.value == CONSISTENT_LIE_VALUE)
+    assert churn_judged.verdict == "unverified"
+    assert "evidence_does_not_touch_data" in churn_judged.detail
+    assert judged.summary["contradicted"] == 0
+
+
 # --- Full app smoke tests via AppTest ------------------------------------------
 
 
@@ -137,7 +157,7 @@ def test_app_toggle_on_shows_contradicted_verdict_without_exception():
     at.run(timeout=120)
     assert not at.exception
 
-    at.toggle[0].set_value(True)
+    at.toggle[0].set_value(True)  # position-based: sidebar's 1st toggle (planted false claim)
     at.run(timeout=120)
 
     assert not at.exception
@@ -150,7 +170,7 @@ def test_app_second_toggle_shows_unverified_verdict_without_exception():
     at.run(timeout=120)
     assert not at.exception
 
-    at.toggle[1].set_value(True)
+    at.toggle[1].set_value(True)  # position-based: sidebar's 2nd toggle (consistent lie)
     at.run(timeout=120)
 
     assert not at.exception

@@ -78,6 +78,15 @@ STATUS_META: dict[str, tuple[str, str, str]] = {
 
 _INK_SECONDARY = "#52514e"
 
+# Verdict-independent accent for the narrow-subset provenance note (same hex
+# as STATUS_META["unverified"]'s amber, but a SEPARATE constant on purpose:
+# STATUS_META's colors are reserved for verdicts only -- this caption can sit
+# on a `verified` or `contradicted` card, and reusing STATUS_META's own
+# color there would make a green "verified" badge read as downgraded by an
+# amber accent underneath it, exactly the misreading
+# `_provenance_caption_html` exists to avoid).
+_ACCENT_AMBER = "#fab219"
+
 
 def inject_planted_false_claim(report: Report) -> Report:
     """Return a copy of `report` with the churn-rate finding's claimed value
@@ -247,11 +256,14 @@ def _provenance_caption_html(
     `evidence_row_count`/`provenance_note` -- pure metadata, computed
     independently of `verdict`, see judge.py). Ordinary (non-narrow)
     provenance is a plain, muted caption: "this claim rests on N of M rows".
-    `provenance_note == "narrow_subset"` gets the same amber accent color as
-    the `unverified` badge (not a loud st.warning box) -- a nudge to read the
-    claim's wording against the population size, not a verdict downgrade;
-    a narrow subset is not itself evidence of a lie (REVIEW.md attack 4
-    remains a documented, separate gap -- this only surfaces the number).
+    `provenance_note == "narrow_subset"` gets `_ACCENT_AMBER` (not a loud
+    st.warning box, and NOT `STATUS_META["unverified"]`'s color -- see
+    `_ACCENT_AMBER`'s comment for why: this caption can sit underneath a
+    `verified` or `contradicted` badge, and STATUS_META's colors are
+    reserved for verdicts only) -- a nudge to read the claim's wording
+    against the population size, not a verdict downgrade; a narrow subset
+    is not itself evidence of a lie (REVIEW.md attack 4 remains a
+    documented, separate gap -- this only surfaces the number).
     """
     ratio = f" of {total_rows}" if total_rows is not None else ""
     text = f"Evidence touched {evidence_row_count}{ratio} rows."
@@ -261,8 +273,7 @@ def _provenance_caption_html(
         " Narrow subset (<10% of the dataset) -- read the claim's wording "
         "against this population."
     )
-    narrow_color = STATUS_META["unverified"][0]
-    return f'<span style="color:{narrow_color};font-size:0.85rem;">⚠️ {text}</span>'
+    return f'<span style="color:{_ACCENT_AMBER};font-size:0.85rem;">⚠️ {text}</span>'
 
 
 def render_finding_card(judged_finding: JudgedFinding, total_rows: int | None = None) -> None:
@@ -364,7 +375,8 @@ def main() -> None:
                 "real recomputed one. This demos ONE of the judge's two failure classes "
                 "-- see the second toggle below for the other. The planted claim is "
                 "clearly labeled in the report as an injected demo lie -- it is never "
-                "presented as a real number."
+                "presented as a real number. (Overridden by the toggle below if both "
+                "are on.)"
             ),
         )
         consistent_lie = st.toggle(
