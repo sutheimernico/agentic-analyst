@@ -9,13 +9,22 @@ network calls, obviously bad SQL) — it is NOT a security boundary against a
 determined adversary. We have no user namespaces, no seccomp, no container,
 no root here; a subprocess run as the same OS user with `python -I` and
 rlimits can still be escaped by someone who wants to. Known, unpatched gaps:
-- `os.fork` spawns children before/around the rlimits and lets code sidestep
-  the wall-clock timeout logic.
 - The network kill-switch only monkeypatches `socket.socket` and
   `socket.create_connection`. DNS resolution via `socket.getaddrinfo` is NOT
   blocked, and code can reach the raw C-level socket module (`import _socket`)
   to build a connection that never touches the patched names.
 - Any file the OS user can read is readable (no filesystem jail).
+- `os.fork`/`subprocess`/`multiprocessing` child-spawning inside the sandbox
+  is now capped by `RLIMIT_NPROC` (see `_set_rlimits` below) rather than left
+  wide open -- the tianpan.co finding that motivated this: "allowing the
+  sandbox to spawn arbitrary subprocesses largely defeats capability
+  restrictions regardless of the surrounding sandbox technology". This is a
+  SOFT mitigation, not a jail: RLIMIT_NPROC counts processes/threads for the
+  real OS *user*, system-wide, not a count scoped to this sandbox's own
+  process tree (no PID namespace/cgroup here). A fork bomb inside the
+  sandbox is bounded and fails with a clean `OSError` once the ceiling is
+  hit, but that ceiling is a budget shared with every other process this OS
+  user happens to be running at the time -- not an isolated allowance.
 If this ever runs on multi-tenant infra or executes anything other than
 "an LLM occasionally being sloppy", wrap it in a real sandbox (container,
 gVisor, firecracker, or a hosted code-execution service).
@@ -82,10 +91,19 @@ def _truncate(text: str, limit: int = _MAX_OUTPUT_CHARS) -> str:
     return text[:limit] + f"\n... (truncated at {limit} chars)"
 
 
-def _set_rlimits(memory_mb: int) -> None:
-    """Run as preexec_fn in the child: cap address space (RLIMIT_AS)."""
+def _set_rlimits(memory_mb: int, max_procs: int) -> None:
+    """Run as preexec_fn in the child: cap address space (RLIMIT_AS) and the
+    number of processes/threads the real OS user may hold (RLIMIT_NPROC) --
+    see the module docstring for why the latter is a soft, per-user
+    mitigation rather than a hard jail. Both soft AND hard limits are set to
+    the same value: an unprivileged process can only ever raise its own
+    limit back up to its hard limit (CAP_SYS_RESOURCE is required to go
+    higher), so pinning both closes off model-generated code calling
+    `resource.setrlimit` on itself to undo this.
+    """
     mem_bytes = memory_mb * 1024 * 1024
     resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+    resource.setrlimit(resource.RLIMIT_NPROC, (max_procs, max_procs))
 
 
 def run_python(
@@ -93,6 +111,7 @@ def run_python(
     workdir: Path,
     timeout_s: int = 30,
     memory_mb: int = 1024,
+    max_procs: int = 512,
 ) -> ToolResult:
     """Execute model-generated Python in a subprocess sandbox.
 
@@ -104,8 +123,8 @@ def run_python(
       (API keys, tokens) leak into the child process.
     - cwd=workdir: confines relative file writes to the working directory
       (not a real filesystem jail — absolute paths still work).
-    - RLIMIT_AS memory cap via preexec_fn, wall-clock timeout via
-      subprocess.communicate(timeout=...).
+    - RLIMIT_AS memory cap and RLIMIT_NPROC process/thread-count cap via
+      preexec_fn, wall-clock timeout via subprocess.communicate(timeout=...).
     - Network kill-switch prelude: monkeypatches socket.socket and
       socket.create_connection to raise before user code runs.
 
@@ -118,6 +137,22 @@ def run_python(
     working-set memory is a concern. Setting these here protects ALL
     model-generated code at the sandbox level; the model neither knows about
     the quirk nor should have to.
+
+    `max_procs` (default 512) is the RLIMIT_NPROC ceiling: the maximum
+    number of processes/threads the sandboxed child (or anything it forks)
+    may cause the real OS user to hold at once. It is NOT scoped to this
+    subprocess's own descendants -- see module docstring -- so the value has
+    to clear two bars: (a) comfortably above this machine's ordinary ambient
+    process count for the user running the sandbox (measured at ~20 on this
+    dev machine while writing this), so legitimate work (a `subprocess.run`
+    call, a joblib worker) doesn't get starved by pre-existing load, and (b)
+    small enough that an actual fork bomb inside the sandbox is stopped
+    within a bounded, small number of processes rather than being left
+    effectively unlimited (the previous state: this OS user's own `ulimit
+    -u` here is 63201). 512 clears both with wide margin on this single-user
+    box; a genuinely multi-tenant or heavily loaded deployment should
+    recompute this from its own ambient process count rather than reusing
+    this constant.
     """
     env = {
         "PATH": "/usr/bin:/bin",
@@ -136,7 +171,7 @@ def run_python(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            preexec_fn=lambda: _set_rlimits(memory_mb),
+            preexec_fn=lambda: _set_rlimits(memory_mb, max_procs),
         )
     except OSError as exc:
         elapsed = time.monotonic() - start

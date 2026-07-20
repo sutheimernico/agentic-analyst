@@ -68,6 +68,40 @@ def test_run_python_memory_bomb_fails_without_killing_test_process(tmp_path):
     assert "MemoryError" in result.stderr
 
 
+def test_run_python_fork_bomb_blocked_cleanly_by_nproc_limit(tmp_path):
+    # A real fork bomb also forks from EVERY child (unbounded exponential
+    # growth) -- unsafe to actually run in a test. This variant only ever
+    # forks from the single original process; each child exits immediately
+    # via os._exit (never forking itself), so the total number of processes
+    # created is bounded by the RLIMIT_NPROC ceiling, not exponential. It
+    # still proves the sandbox stops "keep spawning children" (the
+    # tianpan.co finding), and reaps every child so none are left as
+    # zombies once run_python returns.
+    code = (
+        "import os\n"
+        "pids = []\n"
+        "try:\n"
+        "    while True:\n"
+        "        pid = os.fork()\n"
+        "        if pid == 0:\n"
+        "            os._exit(0)\n"
+        "        pids.append(pid)\n"
+        "except OSError as exc:\n"
+        "    print(f'blocked after {len(pids)} forks ({type(exc).__name__})')\n"
+        "finally:\n"
+        "    for pid in pids:\n"
+        "        try:\n"
+        "            os.waitpid(pid, 0)\n"
+        "        except OSError:\n"
+        "            pass\n"
+    )
+    result = run_python(code, workdir=tmp_path, timeout_s=20)
+
+    assert result.ok, result.stderr
+    assert result.error is None
+    assert "blocked after" in result.stdout
+
+
 def test_run_python_network_socket_create_connection_blocked(tmp_path):
     code = (
         "import socket\n"
