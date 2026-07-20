@@ -186,12 +186,13 @@ RUN_PYTHON_TOOL = {
         "finding's evidence (the code a separate judge process will "
         "re-execute to check the finding's claimed value), print the "
         "recomputed value on its own line in the exact form `RESULT: "
-        "<value>` -- other print statements (labels, intermediate "
-        "diagnostics) are fine anywhere around it. Without a `RESULT:` "
-        "line, the judge falls back to treating the last non-blank stdout "
-        "line as the value, so unlabelled bare-print output still works, "
-        "but `RESULT:` is the reliable convention for anything with "
-        "decorated output."
+        "<value>`, e.g. `print(f\"RESULT: {value}\")` -- other print "
+        "statements (labels, intermediate diagnostics) are fine anywhere "
+        "around it, and the match is not case-sensitive. Without a "
+        "`RESULT:` line, the judge falls back to treating the last "
+        "non-blank stdout line as the value, so unlabelled bare-print "
+        "output still works, but `RESULT:` is the reliable convention for "
+        "anything with decorated output."
     ),
     "input_schema": {
         "type": "object",

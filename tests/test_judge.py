@@ -231,6 +231,58 @@ def test_python_evidence_result_sentinel_is_extracted_from_decorated_stdout(tmp_
     assert judged.recomputed_value == pytest.approx(REAL_CHURN_RATE, abs=1e-3)
 
 
+def test_python_evidence_lowercase_result_sentinel_is_still_recognized(tmp_path):
+    # Reviewer follow-up: the sentinel match must be case-insensitive. LLMs
+    # drop case details routinely -- before this fix, a lowercase `result:
+    # 0.2654` line silently fell through to the legacy fallback, which then
+    # returned the ENTIRE decorated line ("result: 0.2654") as the raw
+    # value; that string fails to parse as a number, so the finding came
+    # back `unverified` instead of `verified` with no loud signal that the
+    # sentinel was even attempted.
+    finding = Finding(
+        claim="26.5% of customers churned.",
+        evidence_sql_or_code=(
+            f"import pandas as pd\n"
+            f"df = pd.read_csv({str(TELCO_CSV)!r})\n"
+            "rate = (df['Churn'] == 'Yes').mean()\n"
+            "print(f'result: {rate:.4f}')\n"
+        ),
+        value=REAL_CHURN_RATE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+    assert judged.recomputed_value == pytest.approx(REAL_CHURN_RATE, abs=1e-3)
+
+
+def test_python_evidence_multiple_disagreeing_result_lines_pins_last_one_wins(tmp_path):
+    # Reviewer follow-up: _extract_python_value's docstring claims the last
+    # `RESULT:` line wins when more than one is printed, but nothing pinned
+    # that behavior. This is a deliberately malformed evidence script (two
+    # disagreeing RESULT lines) -- pinning the exact chosen tie-break here
+    # rather than leaving it as an untested docstring claim. Disagreement
+    # between multiple RESULT lines is a documented, accepted limitation
+    # (see the docstring) rather than a separately flagged case: doing so
+    # would require widening the extractor's two-element return contract.
+    finding = Finding(
+        claim="26.5% of customers churned.",
+        evidence_sql_or_code=(
+            f"import pandas as pd\n"
+            f"df = pd.read_csv({str(TELCO_CSV)!r})\n"
+            "print('RESULT: 0.9')\n"
+            "rate = (df['Churn'] == 'Yes').mean()\n"
+            "print(f'RESULT: {rate:.4f}')\n"
+        ),
+        value=REAL_CHURN_RATE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+    assert judged.recomputed_value == pytest.approx(REAL_CHURN_RATE, abs=1e-3)
+
+
 def test_broken_extractor_contract_raises_loud_value_error(tmp_path, monkeypatch):
     # Regression guard for the bare `assert raw_value is not None` this task
     # replaced (REVIEW.md A-4): if an extractor ever reports success
@@ -240,7 +292,16 @@ def test_broken_extractor_contract_raises_loud_value_error(tmp_path, monkeypatch
     # the extractor and the evidence, not a bare AssertionError with no
     # context (and one that silently vanishes if Python is ever run with
     # -O, which strips asserts).
-    monkeypatch.setattr(judge, "_extract_python_value", lambda evidence, workdir: (None, None))
+    # Named (not lambda) so its __name__ matches the real extractor's --
+    # verify_finding now builds the diagnostic name via
+    # `_extract_python_value.__name__` (reviewer follow-up, replacing a
+    # hand-typed string literal), so a lambda stand-in here would report
+    # itself as "<lambda>" and this test would stop proving anything about
+    # the real extractor's name appearing in the error.
+    def _extract_python_value(evidence, workdir):
+        return (None, None)
+
+    monkeypatch.setattr(judge, "_extract_python_value", _extract_python_value)
     finding = Finding(
         claim="broken extractor contract regression guard.",
         evidence_sql_or_code=f"import pandas as pd\npd.read_csv({str(TELCO_CSV)!r})\nprint(1)",

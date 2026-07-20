@@ -195,7 +195,7 @@ def _extract_sql_value(evidence: str, csv_path: Path) -> tuple[str | None, str |
         return None, f"could not extract a single value from the query result: {exc}"
 
 
-_RESULT_SENTINEL_RE = re.compile(r"^RESULT:\s*(.*)$")
+_RESULT_SENTINEL_RE = re.compile(r"^RESULT:\s*(.*)$", re.IGNORECASE)
 
 
 def _extract_python_value(evidence: str, workdir: Path) -> tuple[str | None, str | None]:
@@ -205,14 +205,28 @@ def _extract_python_value(evidence: str, workdir: Path) -> tuple[str | None, str
     `agent.py`'s `RUN_PYTHON_TOOL` description, so this is a real contract
     between agent and judge rather than judge-internal folklore): evidence
     code should print the recomputed value on its own line in the exact
-    form `RESULT: <value>`. Every non-blank stdout line is scanned for that
-    sentinel (not just the last one) so decorated output -- labels,
-    intermediate diagnostics, a trailing "done." -- printed before OR after
-    the sentinel line doesn't break extraction; if more than one `RESULT:`
-    line is present (which a well-behaved finding should never emit), the
-    last one wins, mirroring the fallback's own "last line" tie-break.
-    Scanning by a distinct label also leaves room for a second, independent
-    sentinel (e.g. a future `ROWS: <n>` line) without the two colliding.
+    form `RESULT: <value>`. The match is case-insensitive (`result:`,
+    `Result:`, ... all recognized) -- an LLM asked to emit a fixed-format
+    label routinely drifts on case, and a silent fallthrough to the "last
+    line" fallback below would then return the WHOLE decorated line (label
+    text and all) as the raw value instead of loudly failing, which is
+    worse than rejecting it outright.
+
+    Every non-blank stdout line is scanned for that sentinel (not just the
+    last one) so decorated output -- labels, intermediate diagnostics, a
+    trailing "done." -- printed before OR after the sentinel line doesn't
+    break extraction; if more than one `RESULT:` line is present (which a
+    well-behaved finding should never emit), the last one wins, mirroring
+    the fallback's own "last line" tie-break (pinned by
+    test_python_evidence_multiple_disagreeing_result_lines_pins_last_one_wins
+    in tests/test_judge.py). Disagreeing values across multiple `RESULT:`
+    lines are NOT separately flagged in the verdict detail: doing so would
+    require widening this function's two-element (raw_value, error_detail)
+    return contract to carry a third, non-fatal warning distinct from
+    "extraction failed" -- deliberately not done for a case a well-formed
+    finding should never produce. Scanning by a distinct label also leaves
+    room for a second, independent sentinel (e.g. a future `ROWS: <n>`
+    line) without the two colliding.
 
     Fallback (legacy, pre-sentinel convention, kept for backwards
     compatibility): if no `RESULT:` line is found, the last non-blank stdout
@@ -482,10 +496,10 @@ def verify_finding(
         )
 
     if _is_sql(evidence):
-        extractor_name = "_extract_sql_value"
+        extractor_name = _extract_sql_value.__name__
         raw_value, error_detail = _extract_sql_value(evidence, csv_path)
     else:
-        extractor_name = "_extract_python_value"
+        extractor_name = _extract_python_value.__name__
         raw_value, error_detail = _extract_python_value(evidence, workdir)
 
     if error_detail is not None:
