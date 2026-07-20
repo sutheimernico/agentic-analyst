@@ -793,6 +793,68 @@ def test_python_evidence_without_rows_sentinel_leaves_evidence_row_count_none(tm
     assert judged.provenance_note is None
 
 
+def test_sql_companion_row_count_query_failure_degrades_to_none(tmp_path):
+    # Quality-review follow-up (Task A5): the fail-safe design of the
+    # row-count companion query has its own real, present-day gap --
+    # _mask_parenthesized only hides content inside PARENTHESES, not string
+    # literals, so a string literal containing the word "FROM" ahead of the
+    # query's real FROM clause defeats the top-level FROM search: it matches
+    # the literal's FROM first, slicing the substituted query mid-quote and
+    # producing a malformed, unbalanced-quote companion query. DuckDB's
+    # parser rejects it (see _row_count_query's docstring for the exact
+    # substituted text). This must fail SAFE -- evidence_row_count degrades
+    # to None, not a wrong number or an unhandled exception -- and the
+    # verdict path must still behave sanely.
+    #
+    # The original evidence also returns 2 columns (label, y), not the 1x1
+    # a finding's evidence must produce, so it is `unverified` for that
+    # reason regardless -- proving the row-count companion query fails safe
+    # ALONGSIDE that, not that it's the only thing going on here.
+    finding = Finding(
+        claim="testing the row-count companion query's failure path.",
+        evidence_sql_or_code=(
+            "SELECT 'FROM' AS label, avg(CASE WHEN Churn = 'Yes' THEN 1.0 ELSE 0 END) AS y "
+            "FROM data"
+        ),
+        value=0.2654,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "unverified"
+    assert judged.evidence_row_count is None
+    assert judged.provenance_note is None
+
+
+def test_python_evidence_legacy_fallback_picks_value_line_over_trailing_rows_line(tmp_path):
+    # Quality-review follow-up (Task A5): no RESULT: sentinel here -- the
+    # legacy last-line fallback applies. The bare value is printed BEFORE an
+    # optional trailing ROWS: line; the fallback must pick the value line,
+    # not the ROWS: line, as "the value" (see the ROWS: exclusion in
+    # _extract_python_value's fallback pool). Without that exclusion, the
+    # fallback's naive "last non-blank line" would wrongly return the
+    # literal text "ROWS: 7043" as the raw value, which does not parse as a
+    # number close to REAL_CHURN_RATE and would come back `unverified`
+    # instead of `verified`.
+    finding = Finding(
+        claim="26.5% of customers churned.",
+        evidence_sql_or_code=(
+            f"import pandas as pd\n"
+            f"df = pd.read_csv({str(TELCO_CSV)!r})\n"
+            "rate = (df['Churn'] == 'Yes').mean()\n"
+            "print(rate)\n"
+            "print(f'ROWS: {len(df)}')\n"
+        ),
+        value=REAL_CHURN_RATE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+    assert judged.recomputed_value == pytest.approx(REAL_CHURN_RATE, abs=1e-3)
+    assert judged.evidence_row_count == 7043
+
+
 # --- verify_baseline ------------------------------------------------------------
 
 

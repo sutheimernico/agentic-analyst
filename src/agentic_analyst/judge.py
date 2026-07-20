@@ -52,6 +52,7 @@ never rubber-stamped.
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import re
@@ -177,19 +178,30 @@ def _evidence_implausibility_reason(evidence: str, csv_path: Path) -> str | None
 # `evidence_row_count`/`provenance_note` are therefore pure metadata: they
 # are computed independently of, and never feed back into, `verdict`.
 
-_NARROW_SUBSET_THRESHOLD = 0.10
+_NARROW_SUBSET_THRESHOLD = 0.10  # per Task A5 spec (<10%)
 _TOTAL_ROWS_QUERY = "SELECT count(*) FROM data"
 
 
-def _total_row_count(csv_path: Path) -> int | None:
+@functools.cache
+def _total_row_count(csv_path_str: str) -> int | None:
     """The `data` view's total row count, recomputed directly from the CSV --
     never trusted from the agent-authored `Report.dataset.rows` field (same
     recompute-don't-trust principle as the rest of this module: a Dataset is
     just as agent-authored as a Finding's `value`). Returns None if the
     query can't be run at all; this is best-effort provenance metadata, not
     something that should ever raise out of `verify_finding`.
+
+    `@functools.cache`d and keyed on the path STRING (not the `Path` object --
+    equal but distinct `Path` instances already hash equal too, but a plain
+    str key keeps the cache's identity obviously tied to what actually
+    varies): `verify_report` calls `verify_finding` once per finding, and
+    every finding in a report shares the same CSV, so without this a
+    3-finding report reopened DuckDB and re-read the CSV 3 times just to
+    recompute an identical constant (`SELECT count(*) FROM data`) each
+    time. The dataset file is immutable for the lifetime of a process here
+    (no code path ever rewrites `csv_path` mid-run), so caching it is safe.
     """
-    result = query_sql(_TOTAL_ROWS_QUERY, csv_path)
+    result = query_sql(_TOTAL_ROWS_QUERY, Path(csv_path_str))
     if not result.ok:
         return None
     try:
@@ -252,7 +264,22 @@ def _row_count_query(evidence: str) -> str | None:
     the outermost pair. Returns None if no top-level SELECT...FROM pair can
     be found -- should not happen for evidence that already passed the
     plausibility check above, but this is best-effort metadata, not worth a
-    crash if some future evidence shape defeats it.
+    crash if some evidence shape defeats it.
+
+    KNOWN, PRESENT-DAY GAP (not hypothetical, deliberately unfixed -- a real
+    SQL tokenizer is out of scope for this "cheapest correct version"):
+    `_mask_parenthesized` only hides content inside PARENTHESES, not string
+    literals. Evidence like `SELECT 'FROM' AS label, avg(x) AS y FROM data`
+    has the word `FROM` sitting inside a quoted string literal, unmasked and
+    unprotected, positioned before the query's real `FROM data`; the search
+    below matches that literal's `FROM` first and slices the substituted
+    query right through the middle of the quote, producing a malformed,
+    unbalanced-quote query (`SELECT count(*) FROM' AS label, ... FROM
+    data`). DuckDB's parser rejects it, `_sql_evidence_row_count` catches
+    the failed `ToolResult` and returns None -- this fails SAFE (a missing
+    row count), never a wrong one or a crash (see
+    test_sql_companion_row_count_query_failure_degrades_to_none in
+    tests/test_judge.py).
     """
     body = evidence.strip()
     if body.endswith(";"):
@@ -544,6 +571,11 @@ class JudgedFinding:
     # Population provenance (Task A5) -- pure metadata, never a verdict
     # input; both default to None because they are only ever populated once
     # `verify_finding` has actually touched real data (see its docstring).
+    # Either can be populated even when `verdict` is `unverified`: the
+    # row-count companion query runs independently of the value extraction
+    # that produced the `unverified` outcome, so a finding can carry a real
+    # `evidence_row_count`/`provenance_note` alongside a verdict of
+    # "couldn't check the claimed value".
     evidence_row_count: int | None = None
     provenance_note: str | None = None
 
@@ -702,7 +734,7 @@ def verify_finding(
 
     # Total dataset size is the ratio's denominator -- only worth a query
     # when there is a numerator to compare it against.
-    total_rows = _total_row_count(csv_path) if evidence_row_count is not None else None
+    total_rows = _total_row_count(str(csv_path)) if evidence_row_count is not None else None
     provenance_note = _provenance_note(evidence_row_count, total_rows)
 
     if error_detail is not None:
