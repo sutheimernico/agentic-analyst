@@ -191,7 +191,12 @@ class OllamaClient:
         model: str = DEFAULT_MODEL,
         host: str = DEFAULT_HOST,
         num_ctx: int = DEFAULT_NUM_CTX,
-        timeout_s: float = 600.0,
+        # 30 min per call: a 7B model generating a long code block on CPU can
+        # legitimately take >10 min (measured: the baseline-training turn blew
+        # a 600s timeout at ~5 tok/s while shorter turns took 27-47s). The
+        # per-call timeout only needs to catch a truly dead server, not pace
+        # the model.
+        timeout_s: float = 1800.0,
         transport: Transport | None = None,
     ) -> None:
         self.model = model
