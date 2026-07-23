@@ -27,10 +27,25 @@ The one attack class the judge is documented NOT to catch -- population-switch
 (evidence legitimately reads ``FROM data`` but filters to a subpopulation the
 claim's text hides; see the known-gap test in ``tests/test_judge.py``) -- is
 deliberately absent here: a follow-up task (C3) adds a heuristic for it and
-extends this benchmark with that class. Adding it is a one-function change:
-write ``plant_population_switch``, register it in ``_INJECTORS`` and its
-expected caught-verdict in ``CATCH_VERDICT``; ``generate_cases`` picks it up
-automatically.
+extends this benchmark with that class. It is a small, local extension, but NOT
+a drop-in ``Injector``: unlike the four classes here, it cannot be synthesized
+by rescaling ``base.value`` (there is no dishonest *number* to distort -- the
+number is genuinely correct for the narrower population) and it has no magnitude
+dimension. The honest shape C3 needs (documented here, deliberately not built
+yet -- see ``_INJECTORS`` for the registration side):
+
+- ``BaseFinding`` gains two optional fields, ``subset_evidence_sql: str | None``
+  and ``subset_value: float | None`` -- a real filtered query (e.g. ``... FROM
+  data WHERE Contract='Month-to-month'``) and the value it genuinely computes.
+- ``plant_population_switch(base, magnitude, direction)`` returns a ``Finding``
+  whose *claim text* still describes the full population ("... of ALL
+  customers") while its evidence/value are the honest subset pair. It ignores
+  ``magnitude``/``direction`` (like ``fabricated_evidence``/``alias_dodge`` do),
+  and skips bases without a subset query. It registers in ``_INJECTORS`` +
+  ``CATCH_VERDICT`` exactly like the others, and ``generate_cases`` then picks
+  it up automatically -- its expected verdict is ``verified`` (the documented
+  gap: an execution-based judge cannot catch it), so it measures the gap rather
+  than a catch.
 
 Determinism: there is no RNG here. Case generation is an exhaustive factorial
 over (base x class x magnitude x direction), enumerated in a fixed order, so the
@@ -157,7 +172,10 @@ def plant_alias_dodge(base: BaseFinding, magnitude: float, direction: int) -> Fi
 Injector = Callable[[BaseFinding, float, int], Finding]
 
 # Registry: attack-class name -> injector. Order fixes the enumeration order in
-# generate_cases (and therefore the artifact). C3 adds "population_switch" here.
+# generate_cases (and therefore the artifact). C3 adds "population_switch" here
+# and its expected verdict ("verified" -- the documented gap) in CATCH_VERDICT;
+# that injector needs the two extra BaseFinding fields sketched in the module
+# docstring (it can't be synthesized by rescaling value like these four).
 _INJECTORS: dict[str, Injector] = {
     "value_swap": plant_value_swap,
     "claim_mismatch": plant_claim_mismatch,
@@ -201,6 +219,14 @@ def generate_cases(
     direction)."""
     cases: list[PlantedCase] = []
     for base in bases:
+        if base.value == 0:
+            # distort(0, m, d) == 0 for every magnitude/direction, so a zero
+            # base silently degrades every "lie" back into the honest value --
+            # fail loudly rather than emit undetectable non-lies.
+            raise ValueError(
+                f"base finding {base.label!r} has value 0; distortions of 0 are "
+                "still 0 (not a lie) -- pick a non-zero base quantity"
+            )
         cases.append(
             PlantedCase(
                 base_label=base.label,

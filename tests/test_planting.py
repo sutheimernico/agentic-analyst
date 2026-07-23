@@ -180,6 +180,34 @@ def test_generate_cases_skips_negative_direction_for_magnitudes_at_or_above_one(
     assert half == {1, -1}
 
 
+def test_generate_cases_yields_exactly_seven_tampered_cases_per_class_per_base():
+    # 3 magnitudes x 2 directions + 1 magnitude (>=100%) x 1 direction = 7.
+    # Pins the total case count (1 clean + 4*7 = 29 per base -> 261 for the
+    # benchmark's 9 bases) against an off-by-one in _directions().
+    cases = generate_cases([CHURN_BASE, SENIOR_BASE])
+    for base in ("churn_rate", "senior_fraction"):
+        for cls in ATTACK_CLASSES:
+            n = sum(1 for c in cases if c.base_label == base and c.attack_class == cls)
+            assert n == 7, f"{base}/{cls}: {n}"
+    assert len(cases) == 2 * (1 + len(ATTACK_CLASSES) * 7)
+
+
+def test_generate_cases_rejects_a_zero_value_base():
+    zero_base = BaseFinding(
+        label="always_zero",
+        evidence_sql="SELECT 0 FROM data",
+        claim_template="The value is {n}.",
+        as_int=True,
+        value=0,
+    )
+    try:
+        generate_cases([zero_base])
+    except ValueError as exc:
+        assert "always_zero" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for a zero-value base")
+
+
 def test_attack_class_registry_and_catch_verdicts_are_consistent():
     # C3 extends this benchmark by adding one injector + one CATCH_VERDICT
     # entry; guard that the two stay in lockstep.
