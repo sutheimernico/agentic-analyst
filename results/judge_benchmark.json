@@ -2,14 +2,15 @@
   "meta": {
     "generated_by": "scripts/judge_benchmark.py",
     "dataset": "telco-customer-churn (7,043 rows)",
-    "n_cases": 261,
-    "n_tampered": 252,
+    "n_cases": 264,
+    "n_tampered": 255,
     "n_clean_controls": 9,
     "attack_classes": [
       "value_swap",
       "claim_mismatch",
       "fabricated_evidence",
-      "alias_dodge"
+      "alias_dodge",
+      "population_switch"
     ],
     "magnitudes": [
       0.05,
@@ -26,6 +27,7 @@
     "evidence_kind": "SQL only (the Python-evidence path is covered by unit tests)",
     "negative_direction_note": "negative direction is applied only for magnitudes < 100%; at >=100% it would flip the number's sign rather than distort its magnitude",
     "fabricated_and_alias_are_magnitude_invariant": "fabricated_evidence and alias_dodge are rejected before any value compare (the evidence cannot have touched the data), so their catch rate is 100% at every magnitude by construction",
+    "population_switch_note": "population_switch has no magnitude dimension: one case per base that declares a subset query, tagged magnitude 0.0, an honest subset number under a full-population claim -- caught by the C3 population-mismatch heuristic as 'unverified'. Its catch rate lives in by_class (NOT by_magnitude / by_class_magnitude, whose per-magnitude cells for it are empty by construction). The heuristic's own false-positive rate is the overall FPR: a false positive could only be a clean control it wrongly flagged, including the 3 controls whose claims DO disclose their WHERE filter (m2m_churn_rate, count_churned, count_fiber).",
     "baseline_excluded": "verify_baseline (the ~seconds/case retrain) is excluded -- these attack classes target finding-level claim verification, which never retrains; baseline tamper-detection is covered in tests/test_judge.py",
     "base_findings": [
       {
@@ -76,17 +78,17 @@
     ]
   },
   "overall": {
-    "true_positives": 248,
+    "true_positives": 251,
     "false_negatives": 4,
     "false_positives": 0,
     "true_negatives": 9,
     "precision": 1.0,
-    "recall": 0.9841,
+    "recall": 0.9843,
     "false_positive_rate": 0.0
   },
   "mechanism_match": {
-    "caught": 248,
-    "used_intended_mechanism": 248,
+    "caught": 251,
+    "used_intended_mechanism": 251,
     "rate": 1.0
   },
   "by_class": {
@@ -108,6 +110,11 @@
     "alias_dodge": {
       "caught": 63,
       "n": 63,
+      "recall": 1.0
+    },
+    "population_switch": {
+      "caught": 3,
+      "n": 3,
       "recall": 1.0
     }
   },
@@ -220,6 +227,28 @@
         "caught": 9,
         "n": 9,
         "catch_rate": 1.0
+      }
+    },
+    "population_switch": {
+      "0.05": {
+        "caught": 0,
+        "n": 0,
+        "catch_rate": 0.0
+      },
+      "0.2": {
+        "caught": 0,
+        "n": 0,
+        "catch_rate": 0.0
+      },
+      "0.5": {
+        "caught": 0,
+        "n": 0,
+        "catch_rate": 0.0
+      },
+      "2": {
+        "caught": 0,
+        "n": 0,
+        "catch_rate": 0.0
       }
     }
   },

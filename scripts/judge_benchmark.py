@@ -1,11 +1,14 @@
 """Quantified judge benchmark (Task C1).
 
 Plants controlled lies into a set of verified base findings -- across every
-attack class in ``planting.py`` (value-swap, claim/value mismatch, fabricated
-evidence, alias-dodge) at four relative magnitudes (+-5%, +-20%, +-50%,
-+-200%) -- then runs the real judge (`verify_finding`) on each and measures how
-reliably it catches them. Replaces anecdotal "the judge caught the demo lie"
-confidence with a reproducible precision/recall/catch-rate table + chart.
+attack class in ``planting.py``. The four magnitude-swept classes (value-swap,
+claim/value mismatch, fabricated evidence, alias-dodge) are planted at four
+relative magnitudes (+-5%, +-20%, +-50%, +-200%); the fifth, population_switch
+(Task C3: an honest subpopulation number under a full-population claim), has no
+magnitude dimension and is planted once per base that declares a subset query.
+The real judge (`verify_finding`) is run on each, measuring how reliably it
+catches them. Replaces anecdotal "the judge caught the demo lie" confidence
+with a reproducible precision/recall/catch-rate table + chart.
 
 Base findings are genuinely-true quantities recomputed from the committed telco
 CSV at runtime (each is asserted `verified` before any tampering), so a "catch"
@@ -42,12 +45,19 @@ from agentic_analyst.judge import verify_finding
 from agentic_analyst.planting import (
     ATTACK_CLASSES,
     DEFAULT_MAGNITUDES,
+    SINGLE_CASE_CLASSES,
     BaseFinding,
     PlantedCase,
     generate_cases,
     honest_finding,
 )
 from agentic_analyst.tools import query_sql, single_value
+
+# The magnitude-swept attack classes (everything except the single-case
+# population_switch): these are the bars in the catch-rate-by-magnitude chart
+# and the rows of the class x magnitude table. population_switch has no
+# magnitude dimension and is reported separately from `by_class`.
+SWEPT_CLASSES = tuple(c for c in ATTACK_CLASSES if c not in SINGLE_CASE_CLASSES)
 
 # Deterministic SVG: fix the hash salt so matplotlib's element/clip-path IDs are
 # stable across runs (randomized otherwise), so the committed SVG is byte-stable
@@ -83,23 +93,37 @@ CLASS_LABELS = {
     "alias_dodge": "alias-dodge",
 }
 
-# Base findings: (label, evidence SQL, claim template with one {n}, is-count).
-# A deliberate spread of magnitudes -- low rates (~0.16-0.43), mid means
-# (~32-65), and large counts (11-3096) -- so the catch-rate curve reveals the
-# judge's abs_tol=0.01 floor honestly (a small distortion of a small value can
-# fall under it) rather than by accident of a single value scale.
-_BASE_SPECS: tuple[tuple[str, str, str, bool], ...] = (
+# Base findings: (label, evidence SQL, claim template with one {n}, is-count,
+# subset SQL | None). A deliberate spread of magnitudes -- low rates
+# (~0.16-0.43), mid means (~32-65), and large counts (11-3096) -- so the
+# catch-rate curve reveals the judge's abs_tol=0.01 floor honestly (a small
+# distortion of a small value can fall under it) rather than by accident of a
+# single value scale.
+#
+# The 5th element is the honest subpopulation query for the population_switch
+# class (None = no such case for that base): a real filter whose column/value
+# the full-population claim template above deliberately does NOT name, so the
+# planted case is "full-population framing over a genuinely-correct subset
+# number" -- caught only by the C3 population-mismatch heuristic. The three
+# subsets below (month-to-month churn, fiber-optic charge, two-year tenure) all
+# hide their filter from their claim; note m2m_churn_rate / count_churned /
+# count_fiber below carry no subset because their OWN claims disclose their
+# filter -- they double as the heuristic's false-positive controls.
+_BASE_SPECS: tuple[tuple[str, str, str, bool, str | None], ...] = (
     (
         "churn_rate",
         "SELECT avg(CASE WHEN Churn='Yes' THEN 1.0 ELSE 0 END) FROM data",
         "The overall churn rate is {n} (share of customers with Churn = Yes).",
         False,
+        "SELECT avg(CASE WHEN Churn='Yes' THEN 1.0 ELSE 0 END) FROM data "
+        "WHERE Contract='Month-to-month'",
     ),
     (
         "senior_fraction",
         "SELECT avg(SeniorCitizen) FROM data",
         "The share of senior citizens is {n}.",
         False,
+        None,
     ),
     (
         "m2m_churn_rate",
@@ -107,42 +131,49 @@ _BASE_SPECS: tuple[tuple[str, str, str, bool], ...] = (
         "WHERE Contract='Month-to-month'",
         "Among month-to-month customers, the churn rate is {n}.",
         False,
+        None,
     ),
     (
         "avg_tenure",
         "SELECT avg(tenure) FROM data",
         "The average customer tenure is {n} months.",
         False,
+        "SELECT avg(tenure) FROM data WHERE Contract='Two year'",
     ),
     (
         "avg_monthly_charges",
         "SELECT avg(MonthlyCharges) FROM data",
         "The average monthly charge is {n} dollars.",
         False,
+        "SELECT avg(MonthlyCharges) FROM data WHERE InternetService='Fiber optic'",
     ),
     (
         "blank_total_charges",
         "SELECT sum(CASE WHEN trim(TotalCharges)='' THEN 1 ELSE 0 END) FROM data",
         "{n} rows have a blank (whitespace-only) TotalCharges value.",
         True,
+        None,
     ),
     (
         "count_senior",
         "SELECT sum(SeniorCitizen) FROM data",
         "{n} customers are senior citizens.",
         True,
+        None,
     ),
     (
         "count_churned",
         "SELECT count(*) FROM data WHERE Churn='Yes'",
         "{n} customers churned in total (Churn = Yes).",
         True,
+        None,
     ),
     (
         "count_fiber",
         "SELECT count(*) FROM data WHERE InternetService='Fiber optic'",
         "{n} customers subscribe to fiber-optic internet.",
         True,
+        None,
     ),
 )
 
@@ -156,19 +187,22 @@ def _true_value(sql: str, as_int: bool) -> float:
 
 
 def build_bases() -> list[BaseFinding]:
-    """Recompute each base finding's true value from the real CSV and assert it
+    """Recompute each base finding's true value (and its subset value, where a
+    subset query is declared) from the real CSV and assert the honest finding
     verifies untampered -- a broken base would invalidate every catch built on
     it."""
     bases: list[BaseFinding] = []
     with TemporaryDirectory(prefix="agentic-analyst-bench-base-") as tmp:
         workdir = Path(tmp)
-        for label, sql, template, as_int in _BASE_SPECS:
+        for label, sql, template, as_int, subset_sql in _BASE_SPECS:
             base = BaseFinding(
                 label=label,
                 evidence_sql=sql,
                 claim_template=template,
                 as_int=as_int,
                 value=_true_value(sql, as_int),
+                subset_evidence_sql=subset_sql,
+                subset_value=_true_value(subset_sql, as_int) if subset_sql else None,
             )
             judged = verify_finding(
                 honest_finding(base), CSV_PATH, workdir, rel_tol=REL_TOL, abs_tol=ABS_TOL
@@ -224,6 +258,17 @@ def build_meta(bases: list[BaseFinding], cases: list[PlantedCase]) -> dict:
             "(the evidence cannot have touched the data), so their catch rate is 100% "
             "at every magnitude by construction"
         ),
+        "population_switch_note": (
+            "population_switch has no magnitude dimension: one case per base that "
+            "declares a subset query, tagged magnitude 0.0, an honest subset number "
+            "under a full-population claim -- caught by the C3 population-mismatch "
+            "heuristic as 'unverified'. Its catch rate lives in by_class (NOT "
+            "by_magnitude / by_class_magnitude, whose per-magnitude cells for it are "
+            "empty by construction). The heuristic's own false-positive rate is the "
+            "overall FPR: a false positive could only be a clean control it wrongly "
+            "flagged, including the 3 controls whose claims DO disclose their WHERE "
+            "filter (m2m_churn_rate, count_churned, count_fiber)."
+        ),
         "baseline_excluded": (
             "verify_baseline (the ~seconds/case retrain) is excluded -- these attack "
             "classes target finding-level claim verification, which never retrains; "
@@ -264,11 +309,11 @@ def make_figure(agg: dict, meta: dict) -> Figure:
     ax.tick_params(colors=INK_MUTED, labelsize=9)
 
     magnitudes = list(DEFAULT_MAGNITUDES)
-    n_classes = len(ATTACK_CLASSES)
+    n_classes = len(SWEPT_CLASSES)
     group_width = 0.8
     bar_width = group_width / n_classes
 
-    for ci, cls in enumerate(ATTACK_CLASSES):
+    for ci, cls in enumerate(SWEPT_CLASSES):
         rates = [agg["by_class_magnitude"][cls][f"{m:g}"]["catch_rate"] * 100 for m in magnitudes]
         offsets = [x + (ci - (n_classes - 1) / 2) * bar_width for x in range(len(magnitudes))]
         ax.bar(offsets, rates, bar_width, color=CLASS_COLORS[cls], label=CLASS_LABELS[cls])
@@ -293,11 +338,13 @@ def make_figure(agg: dict, meta: dict) -> Figure:
 
     ax.set_title(headline(agg), color=INK_PRIMARY, fontsize=12.5, loc="left", pad=26)
     ov = agg["overall"]
+    ps = agg["by_class"]["population_switch"]
     ax.text(
         0, 1.02,
-        f"{meta['n_tampered']} planted lies x {len(ATTACK_CLASSES)} attack classes - "
-        f"precision {ov['precision']:.0%}, FPR {ov['false_positive_rate']:.0%} "
-        f"over {meta['n_clean_controls']} honest controls",
+        f"{meta['n_tampered']} planted lies - precision {ov['precision']:.0%}, "
+        f"FPR {ov['false_positive_rate']:.0%} over {meta['n_clean_controls']} honest "
+        f"controls - population-switch heuristic caught {ps['caught']}/{ps['n']} "
+        "(shown separately: no magnitude dimension)",
         transform=ax.transAxes, color=INK_SECONDARY, fontsize=9.5, va="bottom",
     )
     return fig
@@ -329,12 +376,17 @@ def main() -> None:
     print(headline(agg))
     print()
     print(f"{'class':<22} " + " ".join(f"{f'+-{int(m * 100)}%':>7}" for m in DEFAULT_MAGNITUDES))
-    for cls in ATTACK_CLASSES:
+    for cls in SWEPT_CLASSES:
         row = " ".join(
             f"{agg['by_class_magnitude'][cls][f'{m:g}']['catch_rate']:>7.0%}"
             for m in DEFAULT_MAGNITUDES
         )
         print(f"{cls:<22} {row}")
+    ps = agg["by_class"]["population_switch"]
+    print(
+        f"population_switch (single-case, no magnitude sweep): "
+        f"caught {ps['caught']}/{ps['n']} = {ps['recall']:.0%}"
+    )
     ov = agg["overall"]
     mm = agg["mechanism_match"]
     print()

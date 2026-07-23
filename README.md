@@ -18,10 +18,12 @@ LLM whether the text "looks right"; it recomputes the number and checks.
 Be precise about what that mechanism actually guarantees, though: it **recomputes every claimed
 value from its own evidence** — catching a misreported number (the claim disagrees with what its
 own evidence produces) or evidence that never touches the data (a bare literal dressed up as a
-query). It **cannot** catch evidence that is consistently fabricated — code that runs
-successfully and genuinely queries the real data, just a different population than the claim's
-text describes. See ["What the judge does NOT catch"](#what-the-judge-does-not-catch) below —
-that section is a feature of this project's honesty, not a confession.
+query). Evidence that is consistently fabricated — code that runs successfully and genuinely
+queries the real data, just a different population than the claim's text describes — is only
+**partially** caught: a conservative WHERE-predicate heuristic flags the simple hidden-filter
+case (measured below), anything subtler still passes. See ["What the judge does NOT
+catch"](#what-the-judge-does-not-catch) below — that section is a feature of this project's
+honesty, not a confession.
 
 ## The demo: honest report, then two kinds of caught lie
 
@@ -73,8 +75,9 @@ catch"](#what-the-judge-does-not-catch) below for what *neither* toggle can demo
 The demo above shows the judge catching *single* planted lies. "It caught those three"
 is an anecdote, not a measurement — so this project quantifies it. `scripts/judge_benchmark.py`
 takes nine genuinely-true findings recomputed from the real telco CSV (each asserted `verified`
-before any tampering), plants **252 controlled lies** into them — every attack class enumerated
-in `tests/test_judge.py`, at four relative magnitudes (±5%, ±20%, ±50%, ±200%) — re-runs the real
+before any tampering), plants **255 controlled lies** into them — the four magnitude-swept attack
+classes enumerated in `tests/test_judge.py` at four relative magnitudes (±5%, ±20%, ±50%, ±200%),
+plus one population-switch case per base that declares an honest subset query — re-runs the real
 judge on each, and writes the results to a committed artifact (`results/judge_benchmark.json`).
 It is fully deterministic (exhaustive enumeration, no RNG; DuckDB over the fixed CSV), so the
 numbers below are reproducible byte-for-byte.
@@ -83,7 +86,7 @@ numbers below are reproducible byte-for-byte.
 
 **The judge caught 100% of ≥20% distortions; 5% distortions were caught 94% of the time (68 of
 72) — the shortfall is inside the stated tolerance, not a leak.** Catch-rate (share of planted
-lies flagged as `contradicted` or `unverified`) per attack class × magnitude:
+lies flagged as `contradicted` or `unverified`) per magnitude-swept attack class × magnitude:
 
 | attack class | ±5% | ±20% | ±50% | ±200% |
 |---|---|---|---|---|
@@ -92,14 +95,21 @@ lies flagged as `contradicted` or `unverified`) per attack class × magnitude:
 | fabricated evidence (`SELECT <v> AS x`, no `FROM data`) | 100% | 100% | 100% | 100% |
 | alias-dodge (`SELECT <v> AS data`, no `FROM`) | 100% | 100% | 100% | 100% |
 
+The fifth class, **population-switch** (an honest subpopulation number under a full-population
+claim — there is no dishonest value to distort, hence no magnitude sweep and no bar in the chart),
+is planted once per base that declares an honest subset query: the judge's population-mismatch
+heuristic caught **3 of 3**, and flagged **0** of the three control bases whose claim text
+discloses its own filter.
+
 *±200% is single-signed (positive only): a negative direction at ≥100% would flip the number's
 sign rather than distort its magnitude — see the artifact meta (`negative_direction_note`).*
 
-Overall across the 252 planted lies: **precision 100%, recall 98.4%, false-positive rate 0%** (the
+Overall across the 255 planted lies: **precision 100%, recall 98.4%, false-positive rate 0%** (the
 judge flagged 0 of 9 honest control findings — precision and FPR are global rather than per-cell
 because the only source of a false positive is a clean control, which has no attack magnitude). And
-**all 248 caught lies were caught by the mechanism intended for their attack class** — value/claim
-lies as `contradicted`, fabricated/aliased evidence as `unverified` — not by an incidental verdict
+**all 251 caught lies were caught by the mechanism intended for their attack class** — value/claim
+lies as `contradicted`, fabricated/aliased evidence and hidden-filter population switches as
+`unverified` — not by an incidental verdict
 (the artifact's `mechanism_match` field; this is a diagnostic and never enters the catch-rate).
 
 The honest reading of the two numbers below 100%:
@@ -113,10 +123,13 @@ The honest reading of the two numbers below 100%:
 - **Fabricated-evidence and alias-dodge are 100% at every magnitude by construction.** They are
   rejected *before* any value is compared (the evidence can't have touched the data at all), so the
   distortion's size is irrelevant — the magnitude columns are constant on purpose.
-- **The one attack the judge does *not* catch is deliberately absent from this benchmark.** The
-  population-switch gap (honest `FROM data`, but a hidden subpopulation filter — see below) has no
-  execution-detectable signal, so planting it would only re-measure a documented `verified` result.
-  A follow-up task adds a heuristic for it and extends this benchmark with that class.
+- **The population-switch class measures the heuristic, not the recompute.** Its three planted
+  cases carry a genuinely-correct number for a hidden subpopulation — the value↔evidence compare
+  passes by construction, so a catch here is the WHERE-predicate heuristic firing (`unverified`,
+  reason `population_mismatch_suspected`), not a numeric contradiction. The three bases whose
+  claim text discloses its own filter (e.g. "Among month-to-month customers …") double as the
+  heuristic's false-positive controls — none was flagged. The heuristic stays deliberately
+  narrow; its remaining blind spots are listed in "What the judge does NOT catch".
 
 Reproduce: `uv run python scripts/judge_benchmark.py` (rewrites the artifact and both figures).
 
@@ -209,17 +222,23 @@ The judge's guarantee is real but narrow: it proves the report's *evidence* is h
 real data, not that the report's *methodology* is sound, and not that the evidence describes what
 the claim's text says it describes.
 
-- **A consistently fabricated population.** Evidence that legitimately runs `SELECT avg(x) FROM
-  data WHERE Contract='Month-to-month'` while the claim's text says "ALL customers" passes both
-  the evidence-plausibility check and the value compare — the recomputed number is genuinely,
-  correctly derived from a real (if differently scoped) query against the real table. VeriGraph
-  (arXiv [2606.16603](https://arxiv.org/html/2606.16603)) names this failure class precisely:
-  **"executability can mask weak semantic transitions"** — code that runs successfully without
-  actually supporting the claim it's attached to. This judge is execution-based by design (see
-  above), so it inherits this exact limitation; closing it would require comparing the claim
-  text's stated population against the query's actual filter predicates, a semantic check
-  deliberately out of scope here (see `verify_finding`'s docstring in `judge.py` and the pinned,
-  documented-known-gap test in `tests/test_judge.py`).
+- **A consistently fabricated population — now only partially caught.** Evidence that
+  legitimately runs `SELECT avg(x) FROM data WHERE Contract='Month-to-month'` while the claim's
+  text says "ALL customers" passes both the evidence-plausibility check and the value compare —
+  the recomputed number is genuinely, correctly derived from a real (if differently scoped) query
+  against the real table. VeriGraph (arXiv [2606.16603](https://arxiv.org/html/2606.16603)) names
+  this failure class precisely: **"executability can mask weak semantic transitions"** — code that
+  runs successfully without actually supporting the claim it's attached to. This judge is
+  execution-based by design (see above), so it inherits this limitation; a conservative heuristic
+  now closes its simplest shape: the judge extracts a single top-level `col='literal'` /
+  `col IN (...)` WHERE predicate from SQL evidence, and if neither the column-name tokens nor the
+  filtered-value tokens appear in the claim text, it downgrades a `verified` verdict to
+  `unverified` (`population_mismatch_suspected`; it never weakens `contradicted`). Measured in the
+  benchmark above: 3/3 canonical cases caught, 0 false positives on disclosed-filter controls.
+  Deliberately out of reach remain: multi-predicate or non-equality WHERE clauses, subqueries,
+  Python evidence, and any phrasing that mentions the filter column or value — those variants
+  still come back `verified` (see `verify_finding`'s docstring in `judge.py` and the pinned
+  heuristic tests in `tests/test_judge.py`).
 - **Whether a claim is worth making at all.** Nothing here checks scientific validity — whether a
   "finding" is meaningful, or whether the baseline's feature choices are sound. DiscoveryBench
   (arXiv [2407.01725](https://arxiv.org/abs/2407.01725)) benchmarks exactly that harder problem —

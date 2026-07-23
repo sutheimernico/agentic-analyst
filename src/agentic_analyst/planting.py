@@ -23,33 +23,34 @@ The attack classes mirror the ones enumerated in `tests/test_judge.py`:
                              fool a naive "the token ``data`` appears" check.
                              Also ``unverified`` (magnitude-invariant).
 
-The one attack class the judge is documented NOT to catch -- population-switch
-(evidence legitimately reads ``FROM data`` but filters to a subpopulation the
-claim's text hides; see the known-gap test in ``tests/test_judge.py``) -- is
-deliberately absent here: a follow-up task (C3) adds a heuristic for it and
-extends this benchmark with that class. It is a small, local extension, but NOT
-a drop-in ``Injector``: unlike the four classes here, it cannot be synthesized
-by rescaling ``base.value`` (there is no dishonest *number* to distort -- the
-number is genuinely correct for the narrower population) and it has no magnitude
-dimension. The honest shape C3 needs (documented here, deliberately not built
-yet -- see ``_INJECTORS`` for the registration side):
+The fifth attack class, ``population_switch``, measures the judge's Task-C3
+population-switch heuristic (evidence legitimately reads ``FROM data`` but
+filters to a subpopulation the claim's text hides; see the flipped canonical
+test in ``tests/test_judge.py``). Unlike the four classes above it is NOT
+synthesized by rescaling ``base.value`` -- there is no dishonest *number* to
+distort, the number is genuinely correct for the narrower population -- and it
+has no magnitude dimension, so it is emitted ONCE per eligible base rather than
+swept:
 
-- ``BaseFinding`` gains two optional fields, ``subset_evidence_sql: str | None``
+- ``BaseFinding`` carries two optional fields, ``subset_evidence_sql: str | None``
   and ``subset_value: float | None`` -- a real filtered query (e.g. ``... FROM
   data WHERE Contract='Month-to-month'``) and the value it genuinely computes.
 - ``plant_population_switch(base, magnitude, direction)`` returns a ``Finding``
-  whose *claim text* still describes the full population ("... of ALL
-  customers") while its evidence/value are the honest subset pair. It ignores
-  ``magnitude``/``direction`` (like ``fabricated_evidence``/``alias_dodge`` do),
-  and skips bases without a subset query. It registers in ``_INJECTORS`` +
-  ``CATCH_VERDICT`` exactly like the others, and ``generate_cases`` then picks
-  it up automatically -- its expected verdict is ``verified`` (the documented
-  gap: an execution-based judge cannot catch it), so it measures the gap rather
-  than a catch.
+  whose *claim text* still describes the full population (rendered from
+  ``base.claim_template``, e.g. "The overall churn rate is ...") while its
+  evidence/value are the honest subset pair -- so the value<->evidence compare
+  and the claim-text check both pass, and only the C3 heuristic catches it. It
+  ignores ``magnitude``/``direction`` and returns ``None`` for a base without a
+  subset query (skipped by ``generate_cases``).
+- It is listed in ``SINGLE_CASE_CLASSES`` so ``generate_cases`` emits it once
+  per eligible base (magnitude ``0.0``), not across the magnitude sweep. Its
+  ``CATCH_VERDICT`` is ``unverified`` (the heuristic's downgrade), so a caught
+  case is a real catch, not a re-measurement of the old ``verified`` gap.
 
 Determinism: there is no RNG here. Case generation is an exhaustive factorial
-over (base x class x magnitude x direction), enumerated in a fixed order, so the
-benchmark's numbers are identical on every run without needing a seed.
+over (base x class x magnitude x direction) for the swept classes plus one case
+per eligible base for the single-case classes, enumerated in a fixed order, so
+the benchmark's numbers are identical on every run without needing a seed.
 """
 
 from __future__ import annotations
@@ -78,6 +79,14 @@ class BaseFinding:
     claim_template: str
     as_int: bool
     value: float
+    # Optional honest subpopulation pair, used ONLY by the population_switch
+    # injector (both None -> that base produces no population_switch case): a
+    # real filtered query and the value it genuinely computes, e.g.
+    # ``... WHERE Contract='Month-to-month'`` and its churn rate. The full-
+    # population ``claim_template`` is reused verbatim, so the planted lie is
+    # "full-population framing over a subset number".
+    subset_evidence_sql: str | None = None
+    subset_value: float | None = None
 
 
 @dataclass(frozen=True)
@@ -169,33 +178,59 @@ def plant_alias_dodge(base: BaseFinding, magnitude: float, direction: int) -> Fi
     )
 
 
-Injector = Callable[[BaseFinding, float, int], Finding]
+def plant_population_switch(base: BaseFinding, magnitude: float, direction: int) -> Finding | None:
+    """Full-population claim text over an honest subpopulation number.
+
+    Reuses ``base.claim_template`` verbatim (its full-population framing) but
+    renders it with the honest ``subset_value`` and pairs it with the honest
+    ``subset_evidence_sql``: the number is genuinely correct for the narrower
+    population, so the value<->evidence compare and the claim-text check both
+    pass and only the C3 heuristic catches it (via the hidden WHERE filter).
+    Ignores ``magnitude``/``direction`` (there is no number to distort);
+    returns ``None`` for a base without a subset pair, so it is skipped."""
+    if base.subset_evidence_sql is None or base.subset_value is None:
+        return None
+    return Finding(
+        claim=base.claim_template.format(n=_fmt(base.subset_value, base.as_int)),
+        evidence_sql_or_code=base.subset_evidence_sql,
+        value=base.subset_value,
+    )
+
+
+# An injector may return None to signal "no case for this base" (only
+# plant_population_switch does, for a base without a subset pair); the four
+# magnitude-swept injectors always return a Finding.
+Injector = Callable[[BaseFinding, float, int], Finding | None]
 
 # Registry: attack-class name -> injector. Order fixes the enumeration order in
-# generate_cases (and therefore the artifact). C3 adds "population_switch" here
-# and its expected verdict ("verified" -- the documented gap) in CATCH_VERDICT;
-# that injector needs the two extra BaseFinding fields sketched in the module
-# docstring (it can't be synthesized by rescaling value like these four).
+# generate_cases (and therefore the artifact).
 _INJECTORS: dict[str, Injector] = {
     "value_swap": plant_value_swap,
     "claim_mismatch": plant_claim_mismatch,
     "fabricated_evidence": plant_fabricated_evidence,
     "alias_dodge": plant_alias_dodge,
+    "population_switch": plant_population_switch,
 }
 ATTACK_CLASSES: tuple[str, ...] = tuple(_INJECTORS)
 
+# Classes with no magnitude dimension: generate_cases emits ONE case per
+# eligible base (magnitude 0.0) instead of sweeping magnitude x direction.
+SINGLE_CASE_CLASSES: frozenset[str] = frozenset({"population_switch"})
+
 # The verdict a caught case of each class is meant to produce -- value/claim
-# lies are `contradicted` (a number disagreed), fabricated/aliased evidence is
-# `unverified` (the evidence could not have touched the data at all).
-# scripts/judge_benchmark.py reads this to report a per-case `mechanism_match`
-# (caught AND verdict == the class's expected verdict), a diagnostic that a
-# catch used the intended mechanism -- it never enters the catch-rate/recall
-# numbers, which stay a bare `verdict != "verified"`.
+# lies are `contradicted` (a number disagreed); fabricated/aliased evidence is
+# `unverified` (the evidence could not have touched the data at all); a
+# population switch is `unverified` (the C3 heuristic's population_mismatch
+# downgrade). scripts/judge_benchmark.py reads this to report a per-case
+# `mechanism_match` (caught AND verdict == the class's expected verdict), a
+# diagnostic that a catch used the intended mechanism -- it never enters the
+# catch-rate/recall numbers, which stay a bare `verdict != "verified"`.
 CATCH_VERDICT: dict[str, str] = {
     "value_swap": "contradicted",
     "claim_mismatch": "contradicted",
     "fabricated_evidence": "unverified",
     "alias_dodge": "unverified",
+    "population_switch": "unverified",
 }
 
 
@@ -215,8 +250,11 @@ def generate_cases(
     classes: Sequence[str] = ATTACK_CLASSES,
 ) -> list[PlantedCase]:
     """Exhaustive, deterministic factorial of benchmark cases: one honest
-    control per base, then one planted case per (base, class, magnitude,
-    direction)."""
+    control per base, then -- per base -- one planted case per (class,
+    magnitude, direction) for the magnitude-swept classes, and one planted case
+    for each ``SINGLE_CASE_CLASSES`` class that yields a Finding for that base
+    (magnitude 0.0; a base that doesn't produce one, e.g. no subset query for
+    population_switch, is skipped)."""
     cases: list[PlantedCase] = []
     for base in bases:
         if base.value == 0:
@@ -239,8 +277,24 @@ def generate_cases(
         )
         for attack_class in classes:
             injector = _INJECTORS[attack_class]
+            if attack_class in SINGLE_CASE_CLASSES:
+                finding = injector(base, 0.0, 0)
+                if finding is not None:
+                    cases.append(
+                        PlantedCase(
+                            base_label=base.label,
+                            attack_class=attack_class,
+                            magnitude=0.0,
+                            direction=0,
+                            tampered=True,
+                            finding=finding,
+                        )
+                    )
+                continue
             for magnitude in magnitudes:
                 for direction in _directions(magnitude):
+                    finding = injector(base, magnitude, direction)
+                    assert finding is not None  # swept injectors always yield a Finding
                     cases.append(
                         PlantedCase(
                             base_label=base.label,
@@ -248,7 +302,7 @@ def generate_cases(
                             magnitude=magnitude,
                             direction=direction,
                             tampered=True,
-                            finding=injector(base, magnitude, direction),
+                            finding=finding,
                         )
                     )
     return cases

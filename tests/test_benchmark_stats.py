@@ -113,3 +113,31 @@ def test_zero_denominator_mechanism_rate_when_nothing_caught():
     assert agg["overall"]["false_negatives"] == 3
     assert agg["overall"]["recall"] == 0.0
     assert agg["mechanism_match"] == {"caught": 0, "used_intended_mechanism": 0, "rate": 0.0}
+
+
+def test_single_case_class_counts_in_totals_but_not_in_the_magnitude_breakdown():
+    # A population_switch case is magnitude-invariant: generate_cases tags it
+    # with magnitude 0.0 (not one of DEFAULT_MAGNITUDES). It must count as a
+    # normal true positive (overall + by_class recall + mechanism_match, since
+    # CATCH_VERDICT["population_switch"] == "unverified"), yet contribute
+    # NOTHING to the per-magnitude views -- 0.0 is not a swept magnitude, so it
+    # never lands in by_magnitude, and by_class_magnitude's population_switch
+    # cells stay empty (n=0). This is why the README reads its catch rate from
+    # by_class, not by_class_magnitude.
+    per_case = _per_case(
+        [
+            (_case("clean", 0.0, 0, False), "verified"),  # TN
+            (_case("population_switch", 0.0, 0, True), "unverified"),  # TP, intended mechanism
+            (_case("value_swap", 0.20, 1, True), "contradicted"),  # TP, swept
+        ]
+    )
+    agg = aggregate(per_case)
+
+    assert agg["overall"]["true_positives"] == 2
+    assert agg["by_class"]["population_switch"] == {"caught": 1, "n": 1, "recall": 1.0}
+    assert agg["mechanism_match"] == {"caught": 2, "used_intended_mechanism": 2, "rate": 1.0}
+    # magnitude 0.0 is not a swept magnitude -> absent from by_magnitude entirely
+    assert "0" not in agg["by_magnitude"]
+    assert set(agg["by_magnitude"]) == {f"{m:g}" for m in DEFAULT_MAGNITUDES}
+    # ...and population_switch's per-magnitude cells are all empty (n == 0)
+    assert all(cell["n"] == 0 for cell in agg["by_class_magnitude"]["population_switch"].values())
