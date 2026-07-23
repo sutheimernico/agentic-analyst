@@ -321,7 +321,7 @@ uv run python scripts/demo_fake_run.py
 # Judge demo: independently re-verify results/report.json -> results/judged_report.json
 uv run python scripts/demo_judge_run.py
 
-# Judge benchmark: plant 252 controlled lies, measure catch-rate -> results/judge_benchmark.json + figures
+# Judge benchmark: plant 255 controlled lies, measure catch-rate -> results/judge_benchmark.json + figures
 uv run python scripts/judge_benchmark.py
 
 # App: report UI with verification badges + the two tamper toggles
@@ -351,4 +351,4 @@ done — see `PLAN.md` for the milestone-by-milestone detail and `AUTOPILOT_LOG.
 build history, including two design fixes the judge's own tests forced (a tolerance bug that let
 moderate proportion lies through, and an invariant leak on non-numeric recomputes). The judge's
 catch-rate is quantified (see "Measured judge performance" above) rather than asserted — a
-reproducible 252-lie benchmark, not the demo's three anecdotes.
+reproducible 255-lie benchmark, not the demo's three anecdotes.
