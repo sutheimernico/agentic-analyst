@@ -11,8 +11,10 @@ Base findings are genuinely-true quantities recomputed from the committed telco
 CSV at runtime (each is asserted `verified` before any tampering), so a "catch"
 is a real catch, not an artifact of a broken base. Everything is deterministic
 (exhaustive enumeration, no RNG; DuckDB over the fixed CSV), so the committed
-artifact is byte-stable across runs. Wall-clock is logged to stdout only, never
-written into the artifact numbers.
+artifact and both figures are byte-stable across runs -- the SVG additionally
+needs a fixed `svg.hashsalt` and a suppressed timestamp (see below), or
+matplotlib would randomize its element IDs and stamp a live date. Wall-clock is
+logged to stdout only, never written into the artifact numbers.
 
 Scope choices (documented in the artifact meta):
 
@@ -33,11 +35,13 @@ from collections import defaultdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import matplotlib
 from matplotlib.figure import Figure
 
 from agentic_analyst.judge import verify_finding
 from agentic_analyst.planting import (
     ATTACK_CLASSES,
+    CATCH_VERDICT,
     DEFAULT_MAGNITUDES,
     BaseFinding,
     PlantedCase,
@@ -45,6 +49,11 @@ from agentic_analyst.planting import (
     honest_finding,
 )
 from agentic_analyst.tools import query_sql, single_value
+
+# Deterministic SVG: fix the hash salt so matplotlib's element/clip-path IDs are
+# stable across runs (randomized otherwise), so the committed SVG is byte-stable
+# (the embedded <dc:date> timestamp is suppressed at savefig time -- see main).
+matplotlib.rcParams["svg.hashsalt"] = "agentic-analyst-judge-benchmark"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CSV_PATH = REPO_ROOT / "data" / "telco-customer-churn.csv"
@@ -180,8 +189,8 @@ def _rate(numer: int, denom: int) -> float:
 
 def run_benchmark(cases: list[PlantedCase]) -> tuple[dict, float, float]:
     """Judge every case. Returns (results_by_case, first_case_seconds,
-    total_seconds). ``results_by_case`` maps case index -> (case, caught)."""
-    per_case: dict[int, tuple[PlantedCase, bool]] = {}
+    total_seconds). ``results_by_case`` maps case index -> (case, verdict)."""
+    per_case: dict[int, tuple[PlantedCase, str]] = {}
     first_case_seconds = 0.0
     total_start = time.perf_counter()
     with TemporaryDirectory(prefix="agentic-analyst-bench-") as tmp:
@@ -193,12 +202,17 @@ def run_benchmark(cases: list[PlantedCase]) -> tuple[dict, float, float]:
             )
             if i == 0:
                 first_case_seconds = time.perf_counter() - t0
-            per_case[i] = (case, judged.verdict != "verified")
+            per_case[i] = (case, judged.verdict)
     return per_case, first_case_seconds, time.perf_counter() - total_start
 
 
-def aggregate(per_case: dict[int, tuple[PlantedCase, bool]]) -> dict:
+def aggregate(per_case: dict[int, tuple[PlantedCase, str]]) -> dict:
     tp = fn = fp = tn = 0
+    # Of the caught tampered cases, how many used the mechanism the attack class
+    # is meant to trip (CATCH_VERDICT) rather than some incidental verdict. This
+    # is a diagnostic only -- it never enters catch-rate/recall, which stay a
+    # bare `verdict != "verified"`.
+    mechanism_matches = 0
     by_class_counts: dict[str, list[int]] = defaultdict(lambda: [0, 0])  # [caught, n]
     by_mag_counts: dict[float, list[int]] = defaultdict(lambda: [0, 0])
     by_cell: dict[str, dict[str, list[int]]] = defaultdict(
@@ -206,10 +220,13 @@ def aggregate(per_case: dict[int, tuple[PlantedCase, bool]]) -> dict:
     )
     missed: list[dict] = []
 
-    for case, caught in per_case.values():
+    for case, verdict in per_case.values():
+        caught = verdict != "verified"
         if case.tampered:
             if caught:
                 tp += 1
+                if verdict == CATCH_VERDICT[case.attack_class]:
+                    mechanism_matches += 1
             else:
                 fn += 1
                 missed.append(
@@ -262,8 +279,14 @@ def aggregate(per_case: dict[int, tuple[PlantedCase, bool]]) -> dict:
         }
         for cls in ATTACK_CLASSES
     }
+    mechanism_match = {
+        "caught": tp,
+        "used_intended_mechanism": mechanism_matches,
+        "rate": _rate(mechanism_matches, tp),
+    }
     return {
         "overall": overall,
+        "mechanism_match": mechanism_match,
         "by_class": by_class,
         "by_magnitude": by_magnitude,
         "by_class_magnitude": by_class_magnitude,
@@ -388,7 +411,9 @@ def main() -> None:
     fig = make_figure(agg, meta)
     OUT_PNG.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUT_PNG, dpi=150, bbox_inches="tight", facecolor=SURFACE)
-    fig.savefig(OUT_SVG, bbox_inches="tight", facecolor=SURFACE)
+    # metadata={"Date": None} drops the live <dc:date> stamp so the SVG is
+    # byte-stable across runs (the fixed svg.hashsalt above handles element IDs).
+    fig.savefig(OUT_SVG, bbox_inches="tight", facecolor=SURFACE, metadata={"Date": None})
 
     print(f"Wrote {OUT_JSON}")
     print(f"Wrote {OUT_PNG}")
@@ -404,12 +429,17 @@ def main() -> None:
         )
         print(f"{cls:<22} {row}")
     ov = agg["overall"]
+    mm = agg["mechanism_match"]
     print()
     print(
         f"overall: precision={ov['precision']:.0%} recall={ov['recall']:.0%} "
         f"FPR={ov['false_positive_rate']:.0%} "
         f"(TP={ov['true_positives']} FN={ov['false_negatives']} "
         f"FP={ov['false_positives']} TN={ov['true_negatives']})"
+    )
+    print(
+        f"mechanism-match: {mm['used_intended_mechanism']}/{mm['caught']} caught lies "
+        f"used the intended detection mechanism ({mm['rate']:.0%})"
     )
     print()
     # Wall-clock: stdout only, never written into the artifact numbers.

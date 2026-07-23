@@ -84,6 +84,11 @@
     "recall": 0.9841,
     "false_positive_rate": 0.0
   },
+  "mechanism_match": {
+    "caught": 248,
+    "used_intended_mechanism": 248,
+    "rate": 1.0
+  },
   "by_class": {
     "value_swap": {
       "caught": 61,

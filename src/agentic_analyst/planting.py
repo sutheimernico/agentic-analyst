@@ -166,10 +166,13 @@ _INJECTORS: dict[str, Injector] = {
 }
 ATTACK_CLASSES: tuple[str, ...] = tuple(_INJECTORS)
 
-# The verdict a caught case of each class produces -- value/claim lies are
-# `contradicted` (a number disagreed), fabricated/aliased evidence is
-# `unverified` (the evidence could not have touched the data at all). Used by
-# the benchmark to sanity-check that a catch used the intended mechanism.
+# The verdict a caught case of each class is meant to produce -- value/claim
+# lies are `contradicted` (a number disagreed), fabricated/aliased evidence is
+# `unverified` (the evidence could not have touched the data at all).
+# scripts/judge_benchmark.py reads this to report a per-case `mechanism_match`
+# (caught AND verdict == the class's expected verdict), a diagnostic that a
+# catch used the intended mechanism -- it never enters the catch-rate/recall
+# numbers, which stay a bare `verdict != "verified"`.
 CATCH_VERDICT: dict[str, str] = {
     "value_swap": "contradicted",
     "claim_mismatch": "contradicted",

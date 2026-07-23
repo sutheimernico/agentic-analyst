@@ -92,9 +92,15 @@ lies flagged as `contradicted` or `unverified`) per attack class × magnitude:
 | fabricated evidence (`SELECT <v> AS x`, no `FROM data`) | 100% | 100% | 100% | 100% |
 | alias-dodge (`SELECT <v> AS data`, no `FROM`) | 100% | 100% | 100% | 100% |
 
+*±200% is single-signed (positive only): a negative direction at ≥100% would flip the number's
+sign rather than distort its magnitude — see the artifact meta (`negative_direction_note`).*
+
 Overall across the 252 planted lies: **precision 100%, recall 98.4%, false-positive rate 0%** (the
 judge flagged 0 of 9 honest control findings — precision and FPR are global rather than per-cell
-because the only source of a false positive is a clean control, which has no attack magnitude).
+because the only source of a false positive is a clean control, which has no attack magnitude). And
+**all 248 caught lies were caught by the mechanism intended for their attack class** — value/claim
+lies as `contradicted`, fabricated/aliased evidence as `unverified` — not by an incidental verdict
+(the artifact's `mechanism_match` field; this is a diagnostic and never enters the catch-rate).
 
 The honest reading of the two numbers below 100%:
 
