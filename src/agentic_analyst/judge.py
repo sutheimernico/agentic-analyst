@@ -562,6 +562,157 @@ def _claim_agrees_with_value(claim: str, value: float, rel_tol: float, abs_tol: 
     return any(math.isclose(c, value, rel_tol=rel_tol, abs_tol=abs_tol) for c in candidates)
 
 
+# --- population-switch heuristic (Task C3, REVIEW.md attack 4) -----------------
+# A partial, deterministic mitigation for the one gap the evidence-plausibility
+# check and the value<->evidence compare both miss: evidence that legitimately
+# reads `FROM data` but silently narrows the population with a WHERE filter the
+# claim's text never mentions (`... WHERE Contract='Month-to-month'` behind a
+# claim about "ALL customers"). Closing this in general needs a semantic
+# claim<->query check this execution-based judge does not attempt (see
+# verify_finding's docstring); this catches the common, simple shape
+# conservatively and leaves the rest as a documented false negative.
+#
+# EXACT MATCHING RULES (so the false-positive behaviour is auditable):
+#   1. SQL evidence only. Python evidence is never inspected (no-op -> None).
+#   2. Extract a SINGLE SELECT's TOP-LEVEL WHERE clause: content inside
+#      parentheses (CTE bodies, subqueries, an IN-list's own parens) is masked
+#      via `_mask_parenthesized` before WHERE is located, and the clause runs
+#      from `WHERE` to the next top-level clause keyword (GROUP BY / HAVING /
+#      ORDER BY / LIMIT / OFFSET / WINDOW / QUALIFY) or end of query. A
+#      top-level set operator (UNION / INTERSECT / EXCEPT), more than one
+#      top-level WHERE, or no WHERE at all -> None (a query over the whole table
+#      has no hidden population).
+#   3. The clause must be EXACTLY ONE simple predicate:
+#        <col> = '<literal>'    or    <col> IN ('<a>', '<b>', ...)
+#      <col> a bare or double-quoted identifier, every literal single-quoted.
+#      Anything else -- a second predicate joined by AND/OR, a numeric / `>` /
+#      `LIKE` / `BETWEEN` / function comparison, a subquery -- fails the
+#      fullmatch and yields None. This is the "cheapest correct version": it
+#      prefers a false negative (do nothing) to guessing at a predicate shape it
+#      cannot parse. No SQL tokenizer, no new dependency.
+#   4. Tokenize the column name and the literal value(s) into lowercase
+#      alphanumeric runs (`Month-to-month` -> {month, to}; `Fiber optic` ->
+#      {fiber, optic}; `"Contract"` -> {contract}) and likewise the claim. FIRE
+#      only if NEITHER any column-name token NOR any value token appears in the
+#      claim's token set. If the claim mentions the column OR the value (even a
+#      single token), the filter is treated as disclosed and nothing happens --
+#      the false-negative-preferring bias, and why a short/common value token
+#      (e.g. "to") only ever makes the heuristic fire LESS, never more.
+#
+# KNOWN, ACCEPTED LIMITS (all fail SAFE -- toward no downgrade): string literals
+# are NOT masked, so a literal that happens to contain a SQL keyword
+# (`= 'NO LIMIT'`, `= 'UNION BASIC'`, `label = 'WHERE'`) makes the extractor
+# truncate or bail and simply not fire; multi-predicate and non-equality
+# filters are never parsed; Python evidence is never inspected.
+
+_WHERE_CLAUSE_TERMINATOR_RE = re.compile(
+    r"\b(?:GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|OFFSET|WINDOW|QUALIFY)\b", re.IGNORECASE
+)
+_SET_OPERATOR_RE = re.compile(r"\b(?:UNION|INTERSECT|EXCEPT)\b", re.IGNORECASE)
+_TOP_LEVEL_WHERE_RE = re.compile(r"\bWHERE\b", re.IGNORECASE)
+
+_IDENT = r'(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_]*)'
+_STRING_LITERAL = r"'(?:[^']|'')*'"
+_SIMPLE_EQ_PREDICATE_RE = re.compile(rf"\s*(?P<col>{_IDENT})\s*=\s*(?P<val>{_STRING_LITERAL})\s*")
+_SIMPLE_IN_PREDICATE_RE = re.compile(
+    rf"\s*(?P<col>{_IDENT})\s+IN\s*\(\s*(?P<vals>{_STRING_LITERAL}(?:\s*,\s*{_STRING_LITERAL})*)\s*\)\s*",
+    re.IGNORECASE,
+)
+_STRING_LITERAL_RE = re.compile(_STRING_LITERAL)
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+_PREFIX_MATCH_MIN_LEN = 4
+
+
+def _tokens(text: str) -> set[str]:
+    """Lowercase alphanumeric-run tokens of `text` -- every separator
+    (underscore, hyphen, space, quote, ...) splits alike: `Month-to-month` ->
+    {month, to}, `Fiber optic` -> {fiber, optic}, `"Contract"` -> {contract}."""
+    return set(_WORD_RE.findall(text.casefold()))
+
+
+def _token_mentioned(token: str, claim_tokens: set[str]) -> bool:
+    """True if `token` is disclosed by `claim_tokens` -- an exact match, or (for
+    tokens >= 4 chars) a prefix relationship with a claim token so a morphological
+    variant counts: the filter column `Churn` (token "churn") is disclosed by a
+    claim saying "churned". The length floor keeps the prefix branch off short,
+    ambiguous tokens ("to", "no", "dsl"), which must match exactly. This only
+    ever makes a filter look MORE disclosed, so it can only ever SUPPRESS the
+    downgrade (a false negative) -- never trigger one -- keeping the heuristic's
+    false-positive-avoiding bias intact."""
+    if token in claim_tokens:
+        return True
+    if len(token) < _PREFIX_MATCH_MIN_LEN:
+        return False
+    return any(
+        (claim_token.startswith(token) or token.startswith(claim_token))
+        and min(len(token), len(claim_token)) >= _PREFIX_MATCH_MIN_LEN
+        for claim_token in claim_tokens
+    )
+
+
+def _top_level_where_clause(evidence: str) -> str | None:
+    """The text of a single SELECT's top-level WHERE clause, or None if there
+    isn't exactly one this conservative extractor can isolate (see the section
+    header for the exact rules). Parenthesized spans are masked first so a WHERE
+    inside a CTE / subquery / IN-list is never mistaken for the top-level one."""
+    body = evidence.strip()
+    if body.endswith(";"):
+        body = body[:-1]
+    masked = _mask_parenthesized(body)
+    if _SET_OPERATOR_RE.search(masked):
+        return None  # compound query -- more than one population, bail
+    where_matches = list(_TOP_LEVEL_WHERE_RE.finditer(masked))
+    if len(where_matches) != 1:
+        return None  # no WHERE (whole table) or an ambiguous multi-WHERE shape
+    start = where_matches[0].end()
+    terminator = _WHERE_CLAUSE_TERMINATOR_RE.search(masked, start)
+    end = terminator.start() if terminator else len(body)
+    # `_mask_parenthesized` preserves length, so positions map 1:1 back to body.
+    return body[start:end]
+
+
+def _where_predicate_tokens(clause: str) -> tuple[set[str], set[str]] | None:
+    """Parse a single simple predicate into (column tokens, value tokens), or
+    None if `clause` is not exactly one `col = 'lit'` / `col IN (...)` predicate
+    the heuristic will act on."""
+    eq_match = _SIMPLE_EQ_PREDICATE_RE.fullmatch(clause)
+    if eq_match:
+        return _tokens(eq_match.group("col")), _tokens(eq_match.group("val"))
+    in_match = _SIMPLE_IN_PREDICATE_RE.fullmatch(clause)
+    if in_match:
+        value_tokens: set[str] = set()
+        for literal in _STRING_LITERAL_RE.findall(in_match.group("vals")):
+            value_tokens |= _tokens(literal)
+        return _tokens(in_match.group("col")), value_tokens
+    return None
+
+
+def _population_mismatch_reason(evidence: str, claim: str) -> str | None:
+    """A reason string if `evidence`'s single top-level WHERE filter is hidden
+    from `claim` (see the section header for the exact rules), else None.
+    Conservative by construction: SQL only, one simple predicate only, fires
+    only when NEITHER the column nor any value token appears in the claim."""
+    if not _is_sql(evidence):
+        return None
+    clause = _top_level_where_clause(evidence)
+    if clause is None:
+        return None
+    parsed = _where_predicate_tokens(clause)
+    if parsed is None:
+        return None
+    column_tokens, value_tokens = parsed
+    claim_tokens = _tokens(claim)
+    if any(_token_mentioned(t, claim_tokens) for t in column_tokens | value_tokens):
+        return None  # the claim discloses the column or the value -- not hidden
+    return (
+        f"evidence filters on WHERE {clause.strip()} but the claim text mentions "
+        "neither the filtered column nor its value -- the number may rest on a "
+        "narrower population than the claim describes"
+    )
+
+
 @dataclass
 class JudgedFinding:
     finding: Finding
@@ -655,20 +806,31 @@ def verify_finding(
     didn't produce a disprovable number about the data at all, so "couldn't
     legitimately check" is the honest verdict, not "checked and it's wrong".
 
-    KNOWN GAP THIS DOES NOT CLOSE (REVIEW.md attack 4, intentionally not
-    mechanically detectable): evidence that legitimately reads `FROM data`
-    but silently narrows the population -- e.g. filtering to
-    `Contract='Month-to-month'` while the claim's text says "ALL customers"
-    -- passes both this check and the value compare, because the recomputed
-    number is genuinely, correctly derived from a real (if differently
-    scoped) query against the real table. VeriGraph (arXiv 2606.16603) names
-    this failure class "executability can mask weak semantic transitions" --
-    see research/2026-07-19-agentic-judge-sota.md section 4. Closing it
-    would require comparing the claim text's stated population against the
-    query's actual filter predicates -- a semantic check this deterministic,
-    execution-based judge does not attempt (see
-    test_population_switch_evidence_is_a_documented_known_gap_still_verified
-    in tests/test_judge.py).
+    PARTIALLY MITIGATED GAP (REVIEW.md attack 4, Task C3): evidence that
+    legitimately reads `FROM data` but silently narrows the population -- e.g.
+    filtering to `Contract='Month-to-month'` while the claim's text says "ALL
+    customers" -- passes both the plausibility check and the value compare,
+    because the recomputed number is genuinely, correctly derived from a real
+    (if differently scoped) query against the real table. VeriGraph (arXiv
+    2606.16603) names this failure class "executability can mask weak semantic
+    transitions" -- see research/2026-07-19-agentic-judge-sota.md section 4. A
+    full fix needs a semantic claim<->query check this execution-based judge
+    does not attempt; instead, the population-switch HEURISTIC
+    (`_population_mismatch_reason`, applied last, below) closes the common,
+    simple shape CONSERVATIVELY: if the evidence's single top-level WHERE clause
+    is one `col = 'literal'` / `col IN (...)` predicate whose column-name AND
+    value tokens are BOTH absent from the claim text, a still-`verified`
+    verdict is downgraded to `unverified` with reason
+    `population_mismatch_suspected`. It prefers a false negative to a false
+    positive everywhere else -- it does nothing when the claim mentions the
+    column or the value, when the WHERE clause is anything more complex than one
+    simple predicate, or for Python evidence -- so it never turns a
+    `contradicted` into anything weaker and does not touch honest, disclosed
+    filters (see the exact rules on `_population_mismatch_reason`, the flipped
+    canonical case test_population_switch_evidence_is_downgraded_to_unverified,
+    and the no-fire tests in tests/test_judge.py). The residual gap (a hidden
+    filter the parser can't confidently read) remains an accepted false
+    negative, not a silent pass-off as `verified`-and-checked.
 
     Task A5 (population provenance, research/2026-07-19-agentic-judge-sota.md
     rec #5) does not close that gap either -- it only surfaces the
@@ -775,6 +937,21 @@ def verify_finding(
             f"claim_text_disagrees_with_value: claim {finding.claim!r} quotes no number "
             f"matching the claimed value {finding.value!r} (rel_tol={rel_tol}, abs_tol={abs_tol})"
         )
+
+    # Population-switch heuristic (Task C3): runs LAST and ONLY on a still-
+    # `verified` verdict, so it can only ever downgrade verified -> unverified
+    # -- never weaken a `contradicted` (a caught lie stays caught) or a prior
+    # `unverified`. On a downgrade, `recomputed_value` is cleared to None to
+    # uphold the module invariant `unverified => recomputed_value is None`: the
+    # number is correct for the NARROWER population, so surfacing it as a
+    # recomputed_value would read as a checked figure for the claimed one; the
+    # subset filter is named in `detail` instead.
+    if verdict == "verified":
+        population_mismatch = _population_mismatch_reason(evidence, finding.claim)
+        if population_mismatch is not None:
+            verdict = "unverified"
+            recomputed_value = None
+            detail = f"population_mismatch_suspected: {population_mismatch}"
 
     return JudgedFinding(
         finding=finding,

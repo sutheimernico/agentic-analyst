@@ -22,6 +22,12 @@ REAL_CHURN_RATE = 0.2654  # 1869 / 7043 -- known fact about this CSV (see test_t
 # Churn rate among Month-to-month customers only -- known fact about this CSV,
 # recomputed directly via duckdb for the attack-4 test below.
 REAL_MONTH_TO_MONTH_CHURN_RATE = 0.4270967741935484
+# avg(MonthlyCharges) among Fiber-optic customers only -- known fact about this
+# CSV, for the population-switch heuristic tests below.
+REAL_FIBER_AVG_MONTHLY_CHARGE = 91.50012919896615
+# avg(MonthlyCharges) among tenure>60 customers -- a numeric-range filter the
+# heuristic's simple-predicate parser deliberately cannot parse (no-fire case).
+REAL_TENURE_GT60_AVG_MONTHLY_CHARGE = 75.95270078180513
 
 REAL_BASELINE_MODEL = "LogisticRegression(random_state=42, max_iter=1000)"
 REAL_BASELINE_FEATURES = ["tenure", "MonthlyCharges", "TotalCharges"]
@@ -633,27 +639,28 @@ def test_python_evidence_reading_the_real_csv_path_is_still_verified(tmp_path):
     assert judged.recomputed_value == 7043
 
 
-def test_population_switch_evidence_is_a_documented_known_gap_still_verified(tmp_path):
-    # REVIEW.md A-1, attack 4 -- KNOWN GAP, deliberately NOT fixed by the
-    # evidence-plausibility check above (see verify_finding's docstring).
-    # The evidence below is a completely legitimate, executable query
-    # against the real `data` view -- it genuinely computes the churn rate
-    # among Month-to-month customers. The claim text, however, describes the
-    # result as being about "ALL customers", silently switching the
-    # population the number is actually about. Both the plausibility check
-    # (it DOES reference `FROM data`) and the value<->evidence compare (the
-    # recomputed number DOES match the claimed value) pass -- there is
-    # nothing execution-based to catch here, because nothing about the
-    # execution is dishonest; only the claim's framing of the population is.
+def test_population_switch_evidence_is_downgraded_to_unverified(tmp_path):
+    # REVIEW.md A-1, attack 4 -- the CANONICAL known-gap case, now PARTIALLY
+    # mitigated by the population-switch heuristic (Task C3). The evidence
+    # below is a completely legitimate, executable query against the real
+    # `data` view -- it genuinely computes the churn rate among
+    # Month-to-month customers, and the value<->evidence compare passes. The
+    # claim text, however, describes the result as being about "ALL
+    # customers", silently switching the population the number is actually
+    # about. Nothing execution-based catches this: the query IS honest about
+    # the data, only the claim's framing of the population is not.
     #
-    # This is exactly the failure VeriGraph (arXiv 2606.16603) names
-    # "executability can mask weak semantic transitions": see
-    # research/2026-07-19-agentic-judge-sota.md section 4. Mechanically
-    # closing this would require comparing the claim text's stated
-    # population ("ALL customers") against the query's actual WHERE
-    # predicates -- a semantic check well beyond what a deterministic,
-    # execution-based judge does. Documented here as a known limitation, not
-    # silently left undiscovered.
+    # The heuristic closes the canonical case conservatively (see
+    # `_population_mismatch_reason` in judge.py): the top-level WHERE filters
+    # on `Contract='Month-to-month'`, and NEITHER the column name token
+    # ("contract") NOR any filtered-value token ("month"/"to") appears in the
+    # claim text -- so the filter is hidden from the reader and the verdict is
+    # downgraded `verified` -> `unverified` with reason
+    # `population_mismatch_suspected`. This is a heuristic, not a proof: it
+    # only fires on a single simple `col = 'literal'` / `col IN (...)`
+    # predicate whose tokens are absent from the claim, and prefers a false
+    # negative (do nothing) to a false positive everywhere else -- see the
+    # dedicated no-fire tests below and `verify_finding`'s docstring.
     finding = Finding(
         claim="42.7% of ALL customers churned.",
         evidence_sql_or_code=(
@@ -665,8 +672,109 @@ def test_population_switch_evidence_is_a_documented_known_gap_still_verified(tmp
 
     judged = verify_finding(finding, TELCO_CSV, tmp_path)
 
-    assert judged.verdict == "verified"  # known gap -- see comment above
-    assert judged.recomputed_value == pytest.approx(REAL_MONTH_TO_MONTH_CHURN_RATE, abs=1e-6)
+    assert judged.verdict == "unverified"
+    assert "population_mismatch_suspected" in judged.detail
+    # Invariant `unverified => recomputed_value is None`: the (correct-for-the-
+    # subset) number is surfaced in the detail, not as a recomputed_value that
+    # would read as a checked, trustworthy figure for the claimed population.
+    assert judged.recomputed_value is None
+
+
+# --- verify_finding: population-switch heuristic (Task C3) --------------------
+# Partial mitigation for REVIEW.md attack 4. The heuristic extracts a single
+# top-level `col = 'literal'` / `col IN (...)` WHERE predicate and, if NEITHER
+# the column-name token(s) NOR the filtered-value token(s) appear in the claim
+# text (case-insensitive, alphanumeric-token match), downgrades a still-
+# `verified` verdict to `unverified` (`population_mismatch_suspected`). It is
+# deliberately conservative: it prefers a false negative to a false positive,
+# never weakens `contradicted`/`unverified`, and does nothing at all on a
+# WHERE clause it cannot parse as one simple predicate.
+
+_FIBER_AVG_CHARGE_EVIDENCE = (
+    "SELECT avg(MonthlyCharges) AS avg_charge FROM data WHERE InternetService='Fiber optic'"
+)
+
+
+def test_population_switch_hidden_where_filter_is_flagged_unverified(tmp_path):
+    # FIRE case: the number is genuinely the Fiber-optic average, but the claim
+    # frames it as "all customers" and mentions neither the InternetService
+    # column nor the "Fiber optic" value -> population_mismatch_suspected.
+    finding = Finding(
+        claim="The average monthly charge across all customers is 91.5 dollars.",
+        evidence_sql_or_code=_FIBER_AVG_CHARGE_EVIDENCE,
+        value=REAL_FIBER_AVG_MONTHLY_CHARGE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "unverified"
+    assert "population_mismatch_suspected" in judged.detail
+    assert judged.recomputed_value is None
+
+
+def test_population_switch_no_fire_when_claim_mentions_the_filtered_value(tmp_path):
+    # NO-FIRE (value disclosed): the claim mentions the "fiber-optic" value, so
+    # a reader can see the number is scoped -- the heuristic must not fire.
+    finding = Finding(
+        claim="Among fiber-optic customers, the average monthly charge is 91.5 dollars.",
+        evidence_sql_or_code=_FIBER_AVG_CHARGE_EVIDENCE,
+        value=REAL_FIBER_AVG_MONTHLY_CHARGE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+    assert judged.recomputed_value == pytest.approx(REAL_FIBER_AVG_MONTHLY_CHARGE, abs=1e-6)
+
+
+def test_population_switch_no_fire_when_claim_mentions_the_filter_column(tmp_path):
+    # NO-FIRE (column disclosed): the claim names the InternetService column
+    # (even without the value), signalling the number is broken out by it.
+    finding = Finding(
+        claim="Broken out by InternetService, the average monthly charge is 91.5 dollars.",
+        evidence_sql_or_code=_FIBER_AVG_CHARGE_EVIDENCE,
+        value=REAL_FIBER_AVG_MONTHLY_CHARGE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+    assert judged.recomputed_value == pytest.approx(REAL_FIBER_AVG_MONTHLY_CHARGE, abs=1e-6)
+
+
+def test_population_switch_heuristic_never_weakens_a_contradicted_verdict(tmp_path):
+    # CONSERVATIVITY: a value lie on evidence that ALSO hides its population.
+    # The value<->evidence compare contradicts first; the population heuristic
+    # (which only ever runs on a still-`verified` verdict) must NOT soften that
+    # caught lie into a milder `unverified`.
+    finding = Finding(
+        claim="The average monthly charge across all customers is 50 dollars.",
+        evidence_sql_or_code=_FIBER_AVG_CHARGE_EVIDENCE,
+        value=50.0,  # real Fiber-optic avg is ~91.5 -- a lie, must stay contradicted
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "contradicted"
+    assert "population_mismatch_suspected" not in judged.detail
+
+
+def test_population_switch_no_fire_when_where_clause_is_not_a_simple_predicate(tmp_path):
+    # NO-FIRE (unparseable): a numeric-range filter (`tenure > 60`) is not a
+    # `col = 'literal'` / `col IN (...)` predicate, so the parser bails and does
+    # nothing -- the finding stays `verified` on the honest value compare even
+    # though the claim ("all customers") does hide the filter. A false negative
+    # by design: the heuristic never guesses at a predicate it can't parse.
+    finding = Finding(
+        claim="The average monthly charge across all customers is 75.95 dollars.",
+        evidence_sql_or_code="SELECT avg(MonthlyCharges) AS avg_charge FROM data WHERE tenure > 60",
+        value=REAL_TENURE_GT60_AVG_MONTHLY_CHARGE,
+    )
+
+    judged = verify_finding(finding, TELCO_CSV, tmp_path)
+
+    assert judged.verdict == "verified"
+    assert judged.recomputed_value == pytest.approx(REAL_TENURE_GT60_AVG_MONTHLY_CHARGE, abs=1e-6)
 
 
 # --- verify_finding: population provenance (Task A5, SOTA rec #5) -------------
