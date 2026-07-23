@@ -52,6 +52,11 @@ def main() -> None:
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--attempts", type=int, default=3)
     parser.add_argument("--max-iters", type=int, default=20)
+    # Small tool-calling models narrate their next step after an error
+    # instead of emitting the tool call (qwen2.5:7b did, three runs in a
+    # row); the nudge answers a text-only turn with an explicit "make the
+    # tool call" user message. Visible in the transcript, counted in meta.
+    parser.add_argument("--nudges", type=int, default=3)
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -63,7 +68,9 @@ def main() -> None:
         start = time.monotonic()
         try:
             with TemporaryDirectory(prefix="agentic-analyst-ollama-") as tmp:
-                report = run_agent(client, CSV_PATH, Path(tmp), max_iters=args.max_iters)
+                report = run_agent(
+                    client, CSV_PATH, Path(tmp), max_iters=args.max_iters, nudges=args.nudges
+                )
                 elapsed = time.monotonic() - start
                 judged = verify_report(report, CSV_PATH, Path(tmp))
         except AgentIncompleteError as exc:
@@ -86,6 +93,7 @@ def main() -> None:
             "attempt": attempt,
             "attempts_allowed": args.attempts,
             "max_iters": args.max_iters,
+            "nudges_allowed": args.nudges,
             "llm_calls": len(client.transcript),
             "wall_clock_s": round(elapsed, 1),
             "note": (
@@ -119,6 +127,7 @@ def main() -> None:
                     "date": date.today().isoformat(),
                     "attempts": args.attempts,
                     "max_iters": args.max_iters,
+                    "nudges_allowed": args.nudges,
                     "conclusion": (
                         f"{args.model} did not complete the tool-use loop with a "
                         f"valid report in {args.attempts} attempts -- honest "

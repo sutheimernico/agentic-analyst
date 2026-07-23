@@ -149,3 +149,49 @@ def test_loop_ends_cleanly_when_model_stops_without_submitting(tmp_path):
 
     with pytest.raises(AgentIncompleteError):
         run_agent(_ImmediatelyGivesUpLLM(), TELCO_CSV, tmp_path, max_iters=5)
+
+
+# --- nudges (text-only turn recovery) -----------------------------------------
+
+
+class _NarratesThenWorks:
+    """First turn: narrates without a tool call (the observed qwen2.5:7b
+    failure shape). Every later turn: delegates to the scripted FakeLLM."""
+
+    def __init__(self, csv_path):
+        self._inner = FakeLLM(csv_path)
+        self._narrated = False
+
+    def create_message(self, **kwargs):
+        if not self._narrated:
+            self._narrated = True
+            from agentic_analyst.agent import TextBlock
+
+            return LLMResponse(
+                content=[TextBlock(text="Let me plan my approach first.")],
+                stop_reason="end_turn",
+            )
+        return self._inner.create_message(**kwargs)
+
+
+class _OnlyNarrates:
+    """Never calls a tool -- every turn is a text-only end_turn."""
+
+    def create_message(self, **kwargs):
+        return LLMResponse(content=[], stop_reason="end_turn")
+
+
+def test_text_only_turn_ends_the_loop_without_nudges(tmp_path):
+    with pytest.raises(AgentIncompleteError):
+        run_agent(_NarratesThenWorks(TELCO_CSV), TELCO_CSV, tmp_path, nudges=0)
+
+
+def test_one_nudge_recovers_a_narrating_model(tmp_path):
+    report = run_agent(_NarratesThenWorks(TELCO_CSV), TELCO_CSV, tmp_path, nudges=1)
+    assert isinstance(report, Report)
+    assert report.dataset.rows == 7043
+
+
+def test_nudge_budget_is_finite(tmp_path):
+    with pytest.raises(AgentIncompleteError):
+        run_agent(_OnlyNarrates(), TELCO_CSV, tmp_path, max_iters=10, nudges=2)

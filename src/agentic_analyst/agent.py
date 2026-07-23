@@ -341,13 +341,30 @@ def _tool_result_message(tool_use_id: str, result: ToolResult) -> dict:
     }
 
 
-def run_agent(llm: LLMClient, csv_path: Path, workdir: Path, max_iters: int = 12) -> Report:
+NUDGE_MESSAGE = (
+    "You stopped without calling a tool. Continue the task now: call the "
+    "next tool you need, or call submit_report if the analysis is complete. "
+    "Do not describe what you plan to do -- make the tool call."
+)
+
+
+def run_agent(
+    llm: LLMClient, csv_path: Path, workdir: Path, max_iters: int = 12, nudges: int = 0
+) -> Report:
     """Drive the tool-use loop until the model submits a valid report.
 
     Loops until `submit_report` is called with a report that passes
     `validate_report`, or `max_iters` iterations pass without that
     happening -- whichever comes first. Every iteration and tool call is
     logged.
+
+    `nudges` (default 0 = historical behavior): how many times a text-only
+    turn is answered with `NUDGE_MESSAGE` instead of ending the loop. Small
+    tool-calling models routinely narrate their next step after seeing an
+    error ("Let's fix the encoding ...") without emitting the tool call --
+    observed with qwen2.5:7b, which did exactly this in three consecutive
+    otherwise-clean runs. The nudge is a model-agnostic loop property, not a
+    model-specific patch; every nudge is visible in the transcript.
     """
     csv_path = Path(csv_path)
     workdir = Path(workdir)
@@ -370,6 +387,17 @@ def run_agent(llm: LLMClient, csv_path: Path, workdir: Path, max_iters: int = 12
         response = llm.create_message(system=system, messages=messages, tools=TOOLS)
 
         if response.stop_reason != "tool_use":
+            if nudges > 0:
+                nudges -= 1
+                logger.info(
+                    "text-only turn (stop_reason=%s) -- nudging (%d nudge(s) left)",
+                    response.stop_reason,
+                    nudges,
+                )
+                if response.content:
+                    messages.append({"role": "assistant", "content": response.content})
+                messages.append({"role": "user", "content": NUDGE_MESSAGE})
+                continue
             logger.info(
                 "loop stopped with stop_reason=%s (no report submitted)", response.stop_reason
             )
