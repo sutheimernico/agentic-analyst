@@ -68,6 +68,52 @@ not have legitimately produced any number about the real data. That distinction 
 claim this project makes; see ["What the judge does NOT
 catch"](#what-the-judge-does-not-catch) below for what *neither* toggle can demonstrate.
 
+## Measured judge performance
+
+The demo above shows the judge catching *single* planted lies. "It caught those three"
+is an anecdote, not a measurement — so this project quantifies it. `scripts/judge_benchmark.py`
+takes nine genuinely-true findings recomputed from the real telco CSV (each asserted `verified`
+before any tampering), plants **252 controlled lies** into them — every attack class enumerated
+in `tests/test_judge.py`, at four relative magnitudes (±5%, ±20%, ±50%, ±200%) — re-runs the real
+judge on each, and writes the results to a committed artifact (`results/judge_benchmark.json`).
+It is fully deterministic (exhaustive enumeration, no RNG; DuckDB over the fixed CSV), so the
+numbers below are reproducible byte-for-byte.
+
+![Judge catch-rate by distortion magnitude and attack class](results/figures/judge_benchmark.png)
+
+**The judge caught 100% of ≥20% distortions; 5% distortions were caught 94% of the time (68 of
+72) — the shortfall is inside the stated tolerance, not a leak.** Catch-rate (share of planted
+lies flagged as `contradicted` or `unverified`) per attack class × magnitude:
+
+| attack class | ±5% | ±20% | ±50% | ±200% |
+|---|---|---|---|---|
+| value-swap (wrong `value`, honest evidence) | 89% | 100% | 100% | 100% |
+| claim/value mismatch (lying claim text, honest `value`) | 89% | 100% | 100% | 100% |
+| fabricated evidence (`SELECT <v> AS x`, no `FROM data`) | 100% | 100% | 100% | 100% |
+| alias-dodge (`SELECT <v> AS data`, no `FROM`) | 100% | 100% | 100% | 100% |
+
+Overall across the 252 planted lies: **precision 100%, recall 98.4%, false-positive rate 0%** (the
+judge flagged 0 of 9 honest control findings — precision and FPR are global rather than per-cell
+because the only source of a false positive is a clean control, which has no attack magnitude).
+
+The honest reading of the two numbers below 100%:
+
+- **The four misses are all the same shape.** Every missed case is a ±5% distortion of the
+  senior-citizen rate (≈0.162) under the value-swap and claim/value-mismatch classes. A 5%
+  distortion of a ~0.16 value is ≈0.008 — under the judge's `abs_tol=0.01` floor, so `math.isclose`
+  reports a match. This is the tolerance behaving exactly as documented (see "The tolerance spec"
+  below), not a hole: a distortion smaller than the floor is, by design, treated as noise. Larger
+  values (counts, means) are always caught even at ±5%, because their 5% is far above the floor.
+- **Fabricated-evidence and alias-dodge are 100% at every magnitude by construction.** They are
+  rejected *before* any value is compared (the evidence can't have touched the data at all), so the
+  distortion's size is irrelevant — the magnitude columns are constant on purpose.
+- **The one attack the judge does *not* catch is deliberately absent from this benchmark.** The
+  population-switch gap (honest `FROM data`, but a hidden subpopulation filter — see below) has no
+  execution-detectable signal, so planting it would only re-measure a documented `verified` result.
+  A follow-up task adds a heuristic for it and extends this benchmark with that class.
+
+Reproduce: `uv run python scripts/judge_benchmark.py` (rewrites the artifact and both figures).
+
 ## Architecture
 
 ```
@@ -228,6 +274,9 @@ uv run python scripts/demo_fake_run.py
 # Judge demo: independently re-verify results/report.json -> results/judged_report.json
 uv run python scripts/demo_judge_run.py
 
+# Judge benchmark: plant 252 controlled lies, measure catch-rate -> results/judge_benchmark.json + figures
+uv run python scripts/judge_benchmark.py
+
 # App: report UI with verification badges + the two tamper toggles
 uv run streamlit run app.py
 
@@ -253,4 +302,6 @@ and the judge re-verifies.
 Milestones 1–6 (tools, agent loop, baseline modelling, judge layer, report UI, this write-up) are
 done — see `PLAN.md` for the milestone-by-milestone detail and `AUTOPILOT_LOG.md` for the full
 build history, including two design fixes the judge's own tests forced (a tolerance bug that let
-moderate proportion lies through, and an invariant leak on non-numeric recomputes).
+moderate proportion lies through, and an invariant leak on non-numeric recomputes). The judge's
+catch-rate is quantified (see "Measured judge performance" above) rather than asserted — a
+reproducible 252-lie benchmark, not the demo's three anecdotes.
