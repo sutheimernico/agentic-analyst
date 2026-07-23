@@ -1,0 +1,247 @@
+{
+  "meta": {
+    "generated_by": "scripts/judge_benchmark.py",
+    "dataset": "telco-customer-churn (7,043 rows)",
+    "n_cases": 261,
+    "n_tampered": 252,
+    "n_clean_controls": 9,
+    "attack_classes": [
+      "value_swap",
+      "claim_mismatch",
+      "fabricated_evidence",
+      "alias_dodge"
+    ],
+    "magnitudes": [
+      0.05,
+      0.2,
+      0.5,
+      2.0
+    ],
+    "tolerances": {
+      "rel_tol": 0.01,
+      "abs_tol": 0.01
+    },
+    "deterministic": true,
+    "rng": "none -- exhaustive factorial enumeration",
+    "evidence_kind": "SQL only (the Python-evidence path is covered by unit tests)",
+    "negative_direction_note": "negative direction is applied only for magnitudes < 100%; at >=100% it would flip the number's sign rather than distort its magnitude",
+    "fabricated_and_alias_are_magnitude_invariant": "fabricated_evidence and alias_dodge are rejected before any value compare (the evidence cannot have touched the data), so their catch rate is 100% at every magnitude by construction",
+    "baseline_excluded": "verify_baseline (the ~seconds/case retrain) is excluded -- these attack classes target finding-level claim verification, which never retrains; baseline tamper-detection is covered in tests/test_judge.py",
+    "base_findings": [
+      {
+        "label": "churn_rate",
+        "evidence_sql": "SELECT avg(CASE WHEN Churn='Yes' THEN 1.0 ELSE 0 END) FROM data",
+        "true_value": 0.2653698707936959
+      },
+      {
+        "label": "senior_fraction",
+        "evidence_sql": "SELECT avg(SeniorCitizen) FROM data",
+        "true_value": 0.1621468124378816
+      },
+      {
+        "label": "m2m_churn_rate",
+        "evidence_sql": "SELECT avg(CASE WHEN Churn='Yes' THEN 1.0 ELSE 0 END) FROM data WHERE Contract='Month-to-month'",
+        "true_value": 0.4270967741935484
+      },
+      {
+        "label": "avg_tenure",
+        "evidence_sql": "SELECT avg(tenure) FROM data",
+        "true_value": 32.37114865824223
+      },
+      {
+        "label": "avg_monthly_charges",
+        "evidence_sql": "SELECT avg(MonthlyCharges) FROM data",
+        "true_value": 64.76169246059922
+      },
+      {
+        "label": "blank_total_charges",
+        "evidence_sql": "SELECT sum(CASE WHEN trim(TotalCharges)='' THEN 1 ELSE 0 END) FROM data",
+        "true_value": 11
+      },
+      {
+        "label": "count_senior",
+        "evidence_sql": "SELECT sum(SeniorCitizen) FROM data",
+        "true_value": 1142
+      },
+      {
+        "label": "count_churned",
+        "evidence_sql": "SELECT count(*) FROM data WHERE Churn='Yes'",
+        "true_value": 1869
+      },
+      {
+        "label": "count_fiber",
+        "evidence_sql": "SELECT count(*) FROM data WHERE InternetService='Fiber optic'",
+        "true_value": 3096
+      }
+    ]
+  },
+  "overall": {
+    "true_positives": 248,
+    "false_negatives": 4,
+    "false_positives": 0,
+    "true_negatives": 9,
+    "precision": 1.0,
+    "recall": 0.9841,
+    "false_positive_rate": 0.0
+  },
+  "by_class": {
+    "value_swap": {
+      "caught": 61,
+      "n": 63,
+      "recall": 0.9683
+    },
+    "claim_mismatch": {
+      "caught": 61,
+      "n": 63,
+      "recall": 0.9683
+    },
+    "fabricated_evidence": {
+      "caught": 63,
+      "n": 63,
+      "recall": 1.0
+    },
+    "alias_dodge": {
+      "caught": 63,
+      "n": 63,
+      "recall": 1.0
+    }
+  },
+  "by_magnitude": {
+    "0.05": {
+      "caught": 68,
+      "n": 72,
+      "recall": 0.9444
+    },
+    "0.2": {
+      "caught": 72,
+      "n": 72,
+      "recall": 1.0
+    },
+    "0.5": {
+      "caught": 72,
+      "n": 72,
+      "recall": 1.0
+    },
+    "2": {
+      "caught": 36,
+      "n": 36,
+      "recall": 1.0
+    }
+  },
+  "by_class_magnitude": {
+    "value_swap": {
+      "0.05": {
+        "caught": 16,
+        "n": 18,
+        "catch_rate": 0.8889
+      },
+      "0.2": {
+        "caught": 18,
+        "n": 18,
+        "catch_rate": 1.0
+      },
+      "0.5": {
+        "caught": 18,
+        "n": 18,
+        "catch_rate": 1.0
+      },
+      "2": {
+        "caught": 9,
+        "n": 9,
+        "catch_rate": 1.0
+      }
+    },
+    "claim_mismatch": {
+      "0.05": {
+        "caught": 16,
+        "n": 18,
+        "catch_rate": 0.8889
+      },
+      "0.2": {
+        "caught": 18,
+        "n": 18,
+        "catch_rate": 1.0
+      },
+      "0.5": {
+        "caught": 18,
+        "n": 18,
+        "catch_rate": 1.0
+      },
+      "2": {
+        "caught": 9,
+        "n": 9,
+        "catch_rate": 1.0
+      }
+    },
+    "fabricated_evidence": {
+      "0.05": {
+        "caught": 18,
+        "n": 18,
+        "catch_rate": 1.0
+      },
+      "0.2": {
+        "caught": 18,
+        "n": 18,
+        "catch_rate": 1.0
+      },
+      "0.5": {
+        "caught": 18,
+        "n": 18,
+        "catch_rate": 1.0
+      },
+      "2": {
+        "caught": 9,
+        "n": 9,
+        "catch_rate": 1.0
+      }
+    },
+    "alias_dodge": {
+      "0.05": {
+        "caught": 18,
+        "n": 18,
+        "catch_rate": 1.0
+      },
+      "0.2": {
+        "caught": 18,
+        "n": 18,
+        "catch_rate": 1.0
+      },
+      "0.5": {
+        "caught": 18,
+        "n": 18,
+        "catch_rate": 1.0
+      },
+      "2": {
+        "caught": 9,
+        "n": 9,
+        "catch_rate": 1.0
+      }
+    }
+  },
+  "missed_cases": [
+    {
+      "base_label": "senior_fraction",
+      "attack_class": "value_swap",
+      "magnitude": 0.05,
+      "direction": 1
+    },
+    {
+      "base_label": "senior_fraction",
+      "attack_class": "value_swap",
+      "magnitude": 0.05,
+      "direction": -1
+    },
+    {
+      "base_label": "senior_fraction",
+      "attack_class": "claim_mismatch",
+      "magnitude": 0.05,
+      "direction": 1
+    },
+    {
+      "base_label": "senior_fraction",
+      "attack_class": "claim_mismatch",
+      "magnitude": 0.05,
+      "direction": -1
+    }
+  ]
+}
