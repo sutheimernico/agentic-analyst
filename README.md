@@ -216,6 +216,42 @@ If this ever ran on multi-tenant infrastructure or executed anything riskier tha
 occasionally being careless," it would need a real sandbox (container, gVisor, Firecracker, or a
 hosted code-execution service) — not what's here.
 
+## A real model at the wheel: measured, honest, negative (for 7B)
+
+Every committed report above was produced by `FakeLLM` — so "was a real model ever at the
+wheel?" is a fair challenge. It has an answer now: a local **qwen2.5:7b** drove the full loop
+live via Ollama's native tool-calling API (`src/agentic_analyst/ollama_client.py`, loopback
+only, no API key, no new dependency), three attempts of 20 iterations each (~57–61 min per
+attempt on CPU, `temperature=0`). **No attempt produced a schema-valid report.** The complete
+request/response transcripts of all three attempts are the committed artifact
+(`results/ollama_failure_transcripts.json`) — this section is written from them, not from memory.
+
+The failure has two distinct layers, and naming them separately is the honest part:
+
+1. **Narration instead of tool calls.** After its own sklearn error, the model reliably switched
+   to describing its next step ("Let's ensure all columns are properly encoded …") without
+   emitting the tool call, which ended the loop. This is a loop-interaction habit, not a tooling
+   inability — it was fixed loop-side with a transcript-visible nudge
+   (`run_agent(nudges=…)` answers a text-only turn with an explicit "make the tool call").
+2. **Schema compliance — the real wall.** With nudges, the model reached `submit_report` — and
+   then submitted qualitative findings with `value: true` ("The 'TotalCharges' column is not
+   numeric." → a JSON boolean) instead of the one measurable value per finding the report
+   contract requires. It re-submitted essentially the same report through repeated, explicit
+   rejection messages until `max_iters` ran out, in all three attempts. That contract is not
+   bureaucracy: one recomputable value per finding is exactly what makes the judge possible.
+
+Worth stating just as plainly — what the 7B model **did** do, live against the real CSV: it ran
+a clean multi-tool analysis (`read_schema` → SQL profiling → sandboxed Python), found the same
+blank-`TotalCharges` data-quality issue the scripted demo reports, engineered its own one-hot
+feature set (29 features), and trained a LogisticRegression with **ROC-AUC ≈ 0.829** on a proper
+held-out split — numerically better than the committed 3-numeric-feature demo baseline (0.8105),
+because it used more features. The takeaway is narrow and real: *7B-class tool calling handles
+the loop but not this pipeline's strict report contract.* The real-Claude run
+(`AnthropicClient`, already wired) stays **Needs Nico** (API key).
+
+Reproduce: `uv run python scripts/run_real_llm.py` (needs a local Ollama with `qwen2.5:7b`;
+writes either the success artifact pair or the failure transcripts — both are results).
+
 ## Red-team scorecard
 
 Every attack class this project has thrown at the judge, in one place — consolidating what the
@@ -306,9 +342,10 @@ for any of this.
 
 The real-Claude agent path (`AnthropicClient`, the actual tool-use loop against `claude-sonnet-5`)
 is wired and importable but untested here by design — set `ANTHROPIC_API_KEY` in `.env` to try it.
-**Needs Nico.** The CSV uploader in the app is disabled for the same reason: `FakeLLM`'s tool-call
-script is scripted specifically for the telco schema and can't analyze an arbitrary upload; that
-needs the real agent.
+**Needs Nico.** A *local* real-model run exists instead — see "A real model at the wheel" above
+for the measured (negative) qwen2.5:7b result. The CSV uploader in the app is disabled for the
+same reason: `FakeLLM`'s tool-call script is scripted specifically for the telco schema and can't
+analyze an arbitrary upload; that needs the real agent.
 
 ## Reproduce it
 
@@ -323,6 +360,9 @@ uv run python scripts/demo_judge_run.py
 
 # Judge benchmark: plant 255 controlled lies, measure catch-rate -> results/judge_benchmark.json + figures
 uv run python scripts/judge_benchmark.py
+
+# Real-LLM run (needs local Ollama + qwen2.5:7b): success artifact pair OR failure transcripts
+uv run python scripts/run_real_llm.py
 
 # App: report UI with verification badges + the two tamper toggles
 uv run streamlit run app.py
