@@ -14,7 +14,7 @@ SDK:
   real CSV -- only the "which tool to call next" decision is scripted, so
   the numbers in the resulting report are genuine.
 
-Needs Nico: the real-API path (`AnthropicClient` against the live model) is
+Needs owner: the real-API path (`AnthropicClient` against the live model) is
 untested here by design -- set `ANTHROPIC_API_KEY` in `.env` to try it.
 """
 
@@ -41,7 +41,7 @@ from agentic_analyst.tools import (
 logger = logging.getLogger(__name__)
 
 # Default loop model and an escalation target for harder reasoning (per
-# PLAN.md). Only DEFAULT_MODEL is wired into AnthropicClient today --
+# the project plan). Only DEFAULT_MODEL is wired into AnthropicClient today --
 # escalation logic (when/how to switch mid-loop) is not built because there
 # is no concrete trigger for it yet (YAGNI); the constant documents the
 # intended target for when M4/M5 need it.

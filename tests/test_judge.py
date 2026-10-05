@@ -291,7 +291,7 @@ def test_python_evidence_multiple_disagreeing_result_lines_pins_last_one_wins(tm
 
 def test_broken_extractor_contract_raises_loud_value_error(tmp_path, monkeypatch):
     # Regression guard for the bare `assert raw_value is not None` this task
-    # replaced (REVIEW.md A-4): if an extractor ever reports success
+    # replaced (review notes A-4): if an extractor ever reports success
     # (error_detail=None) but returns no raw_value -- an internal contract
     # break that no real evidence string can trigger through normal
     # execution -- the failure must be a loud, diagnosable ValueError naming
@@ -337,7 +337,7 @@ def test_tolerance_boundary_just_inside_verifies_just_outside_contradicts(tmp_pa
     assert outside_result.verdict == "contradicted"
 
 
-# --- verify_finding: claim text vs claimed value (REVIEW.md A-1, attack 3) -----
+# --- verify_finding: claim text vs claimed value (review notes A-1, attack 3) -----
 # `_compare` above only checks value<->evidence consistency -- both fields are
 # agent-authored. The natural-language `claim` is the sentence a reader
 # actually trusts and was never read at all: a claim that lies in its text
@@ -537,7 +537,7 @@ def test_bool_value_falls_through_to_string_compare_without_crashing(tmp_path):
     assert judged.verdict == "verified"
 
 
-# --- verify_finding: evidence plausibility (REVIEW.md A-1, attacks 1+2+4) -----
+# --- verify_finding: evidence plausibility (review notes A-1, attacks 1+2+4) -----
 # The claim-text check above (Task A1) closes attack 3 (honest evidence,
 # honest value, lying claim text). It does nothing for evidence that never
 # touched the real dataset at all: `SELECT 0.75 AS churn_rate` (no FROM
@@ -549,7 +549,7 @@ def test_bool_value_falls_through_to_string_compare_without_crashing(tmp_path):
 
 
 def test_sql_evidence_that_never_touches_the_data_view_is_unverified(tmp_path):
-    # REVIEW.md A-1, attack 1: `SELECT 0.75 AS churn_rate` has no FROM clause
+    # review notes A-1, attack 1: `SELECT 0.75 AS churn_rate` has no FROM clause
     # at all -- it can't have queried anything -- yet it recomputes to
     # exactly 0.75 and used to pass as `verified`.
     finding = Finding(
@@ -566,7 +566,7 @@ def test_sql_evidence_that_never_touches_the_data_view_is_unverified(tmp_path):
 
 
 def test_sql_evidence_aliasing_a_column_as_data_without_reading_the_view_is_unverified(tmp_path):
-    # Guards the check's own design against the exact dodge REVIEW.md warns
+    # Guards the check's own design against the exact dodge review notes warns
     # about: naming an *output* column/alias `data` instead of actually
     # reading the view in a FROM/JOIN clause. A check that merely asked "does
     # the token `data` appear anywhere in the query" would be fooled by this;
@@ -585,7 +585,7 @@ def test_sql_evidence_aliasing_a_column_as_data_without_reading_the_view_is_unve
 
 
 def test_python_evidence_that_never_reads_the_dataset_is_unverified(tmp_path):
-    # REVIEW.md A-1, attack 2: `print(0.90)` never opens the CSV -- it can't
+    # review notes A-1, attack 2: `print(0.90)` never opens the CSV -- it can't
     # have computed anything about the real data -- yet it recomputes to
     # exactly 0.90 and used to pass as `verified`.
     finding = Finding(
@@ -640,7 +640,7 @@ def test_python_evidence_reading_the_real_csv_path_is_still_verified(tmp_path):
 
 
 def test_population_switch_evidence_is_downgraded_to_unverified(tmp_path):
-    # REVIEW.md A-1, attack 4 -- the CANONICAL known-gap case, now PARTIALLY
+    # review notes A-1, attack 4 -- the CANONICAL known-gap case, now PARTIALLY
     # mitigated by the population-switch heuristic (Task C3). The evidence
     # below is a completely legitimate, executable query against the real
     # `data` view -- it genuinely computes the churn rate among
@@ -681,7 +681,7 @@ def test_population_switch_evidence_is_downgraded_to_unverified(tmp_path):
 
 
 # --- verify_finding: population-switch heuristic (Task C3) --------------------
-# Partial mitigation for REVIEW.md attack 4. The heuristic extracts a single
+# Partial mitigation for review notes attack 4. The heuristic extracts a single
 # top-level `col = 'literal'` / `col IN (...)` WHERE predicate and, if NEITHER
 # the column-name token(s) NOR the filtered-value token(s) appear in the claim
 # text (case-insensitive, alphanumeric-token match), downgrades a still-
@@ -1036,7 +1036,7 @@ def test_baseline_with_nonexistent_feature_column_is_unverified(tmp_path):
     assert judged.recomputed_value is None
 
 
-# --- verify_baseline: tolerance boundary (REVIEW.md A-3) -----------------------
+# --- verify_baseline: tolerance boundary (review notes A-3) -----------------------
 # The retrain is fully deterministic (fixed seed, verified byte-identical
 # reproduction) -- there is no legitimate source of run-to-run variance to
 # excuse a loose tolerance. This first case is caught by tightening rel_tol
@@ -1051,7 +1051,7 @@ def test_baseline_tolerance_boundary_matches_deterministic_recompute(tmp_path):
         model=REAL_BASELINE_MODEL,
         features=REAL_BASELINE_FEATURES,
         metric_name="roc_auc",
-        metric_value=0.85,  # REVIEW.md A-3: embellished from the real 0.8105
+        metric_value=0.85,  # review notes A-3: embellished from the real 0.8105
     )
     float_noise = Baseline(
         model=REAL_BASELINE_MODEL,

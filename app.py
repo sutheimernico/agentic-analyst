@@ -5,7 +5,7 @@ No `ANTHROPIC_API_KEY` is needed: the report comes from `run_agent` driven by
 `FakeLLM` (a deterministic, scripted stand-in for the real Anthropic API --
 see agent.py) run live against the real telco CSV, so every number on screen
 is computed by the real M1 tools, not invented. The real-Claude path
-(`AnthropicClient`) needs an API key -- Needs Nico.
+(`AnthropicClient`) needs an API key -- Needs owner.
 
 The sidebar has two "demo the judge" toggles, each planting a different class
 of lie into the churn-rate finding before re-judging, so the honest all-green
@@ -43,7 +43,7 @@ from agentic_analyst.report import Report
 REPO_ROOT = Path(__file__).resolve().parent
 CSV_PATH = REPO_ROOT / "data" / "telco-customer-churn.csv"
 
-# The demo lie: overstate the churn rate. Matches PLAN.md's worked example
+# The demo lie: overstate the churn rate. Matches the project plan's worked example
 # (claimed 0.75 vs. the real ~0.2654) so the README and the UI tell the same
 # story. Clearly labeled in the claim text as an injected demonstration --
 # never presented as a real number from the data.
@@ -55,7 +55,7 @@ TAMPERED_CLAIM = (
 
 # The second demo lie: fabricate the evidence too, not just the claim/value.
 # `CONSISTENT_LIE_EVIDENCE` never references the `data` view (no FROM clause
-# at all) -- REVIEW.md finding A-1, attack 1: evidence that recomputes to
+# at all) -- review notes finding A-1, attack 1: evidence that recomputes to
 # exactly its own literal always "matches" whatever value is claimed next to
 # it, a lie that carries its own proof. `judge.py`'s evidence-plausibility
 # precondition (`_evidence_implausibility_reason`) is what catches this, not
@@ -262,7 +262,7 @@ def _provenance_caption_html(
     `verified` or `contradicted` badge, and STATUS_META's colors are
     reserved for verdicts only) -- a nudge to read the claim's wording
     against the population size, not a verdict downgrade; a narrow subset
-    is not itself evidence of a lie (REVIEW.md attack 4 remains a
+    is not itself evidence of a lie (review notes attack 4 remains a
     documented, separate gap -- this only surfaces the number).
     """
     ratio = f" of {total_rows}" if total_rows is not None else ""
@@ -359,7 +359,7 @@ def main() -> None:
         "**Demo mode:** this report comes from the deterministic `FakeLLM` agent "
         "(scripted tool-call sequence, but every number is computed live by the real "
         "sandboxed tools against the real telco CSV) -- no `ANTHROPIC_API_KEY` needed. "
-        "The real-Claude agent path (`AnthropicClient`) needs an API key in `.env` -- Needs Nico.",
+        "The real-Claude agent path (`AnthropicClient`) needs an API key in `.env` -- Needs owner.",
         icon="ℹ️",
     )
 

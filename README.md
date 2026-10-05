@@ -247,7 +247,7 @@ feature set (29 features), and trained a LogisticRegression with **ROC-AUC ≈ 0
 held-out split — numerically better than the committed 3-numeric-feature demo baseline (0.8105),
 because it used more features. The takeaway is narrow and real: *7B-class tool calling handles
 the loop but not this pipeline's strict report contract.* The real-Claude run
-(`AnthropicClient`, already wired) stays **Needs Nico** (API key).
+(`AnthropicClient`, already wired) stays **Needs owner** (API key).
 
 Reproduce: `uv run python scripts/run_real_llm.py` (needs a local Ollama with `qwen2.5:7b`;
 writes either the success artifact pair or the failure transcripts — both are results).
@@ -255,7 +255,7 @@ writes either the success artifact pair or the failure transcripts — both are 
 ## Red-team scorecard
 
 Every attack class this project has thrown at the judge, in one place — consolidating what the
-demo sections, the measured benchmark, REVIEW.md, and `research/2026-07-19-agentic-judge-sota.md`
+demo sections, the measured benchmark, review notes, and the research notes
 established. "Benchmark" numbers come from the committed `results/judge_benchmark.json`;
 every "pinned by" entry is a real test name.
 
@@ -342,7 +342,7 @@ for any of this.
 
 The real-Claude agent path (`AnthropicClient`, the actual tool-use loop against `claude-sonnet-5`)
 is wired and importable but untested here by design — set `ANTHROPIC_API_KEY` in `.env` to try it.
-**Needs Nico.** A *local* real-model run exists instead — see "A real model at the wheel" above
+**Needs owner.** A *local* real-model run exists instead — see "A real model at the wheel" above
 for the measured (negative) qwen2.5:7b result. The CSV uploader in the app is disabled for the
 same reason: `FakeLLM`'s tool-call script is scripted specifically for the telco schema and can't
 analyze an arbitrary upload; that needs the real agent.
@@ -387,8 +387,19 @@ and the judge re-verifies.
 ## Status
 
 Milestones 1–6 (tools, agent loop, baseline modelling, judge layer, report UI, this write-up) are
-done — see `PLAN.md` for the milestone-by-milestone detail and `AUTOPILOT_LOG.md` for the full
-build history, including two design fixes the judge's own tests forced (a tolerance bug that let
+done, including two design fixes the judge's own tests forced (a tolerance bug that let
 moderate proportion lies through, and an invariant leak on non-numeric recomputes). The judge's
 catch-rate is quantified (see "Measured judge performance" above) rather than asserted — a
 reproducible 255-lie benchmark, not the demo's three anecdotes.
+
+## ML Lab series
+
+Part of **ML Lab**, three small projects that each ask "does the shiny thing actually beat the boring thing, and how would you know?":
+
+- [agentic-analyst](https://github.com/sutheimernico/agentic-analyst) - an LLM data-analyst agent plus a judge that recomputes every claim
+- [tabular-showdown](https://github.com/sutheimernico/tabular-showdown) - TabPFN vs tuned LightGBM on tabular data
+- [timeseries-showdown](https://github.com/sutheimernico/timeseries-showdown) - Chronos foundation models vs classical and GBDT baselines
+
+## License
+
+Code: MIT, see `LICENSE`. Dataset: the Telco Customer Churn sample (originally published by IBM as a sample dataset) is bundled for the demo only and remains under its original terms; it is not covered by the MIT license.

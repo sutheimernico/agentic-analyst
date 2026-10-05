@@ -24,7 +24,7 @@ blank->0.0, StandardScaler) in a fresh process, parameterized by the report's
 declared features and the random_state/max_iter parsed out of
 `baseline.model`. This DOES catch a *misreported* metric value -- a number
 that disagrees with what the declared recipe actually produces when run
-(REVIEW.md finding A-3). The net comparison tolerance is `math.isclose`'s
+(review notes finding A-3). The net comparison tolerance is `math.isclose`'s
 `max(rel_tol * max(|a|,|b|), abs_tol)`, i.e. whichever of the two bounds is
 looser for the pair being compared. `rel_tol` (`verify_baseline`'s default,
 1e-6) is the bound that actually governs for real AUC/accuracy metrics: it
@@ -42,7 +42,7 @@ It is explicitly NOT an independent methodology check:
 agent.py's `BASELINE_CODE_TEMPLATE` -- same fillna, same split strategy, same
 seed, same model -- so a methodological bug shared by both (e.g. a leakage
 mistake baked into the template itself) reproduces identically here and
-still passes as `verified` (REVIEW.md finding A-2). `Baseline` also only
+still passes as `verified` (review notes finding A-2). `Baseline` also only
 records model description, features, metric name/value -- not the full
 training recipe (target definition, split strategy, preprocessing) -- so the
 judge can only faithfully retrain the one recipe this project's agent uses.
@@ -83,7 +83,7 @@ def _is_sql(evidence: str) -> bool:
     return bool(leading_word) and leading_word.group(0).upper() in _SQL_LEADING_KEYWORDS
 
 
-# --- evidence plausibility (REVIEW.md finding A-1, attacks 1+2) ---------------
+# --- evidence plausibility (review notes finding A-1, attacks 1+2) ---------------
 # `verify_finding` re-executes whatever evidence a Finding carries and trusts
 # the recomputed value against `finding.value` -- but nothing so far checked
 # that the evidence could have legitimately touched the real dataset at all.
@@ -92,7 +92,7 @@ def _is_sql(evidence: str) -> bool:
 # value is claimed next to them: a lie that carries its own proof. This is
 # the minimal deterministic version of the "witness allow-list" pattern
 # (require evidence to reference a registered source rather than a
-# free-floating literal; see research/2026-07-19-agentic-judge-sota.md
+# free-floating literal; see the research notes
 # section 4). It does not parse SQL or Python -- it only checks that the
 # evidence's source text names the one legitimate data source it was given.
 
@@ -117,7 +117,7 @@ def _sql_evidence_touches_data(query: str) -> bool:
 
     What this CANNOT distinguish: a query that legitimately has `FROM data`
     but filters to a subpopulation the claim's text doesn't mention still
-    passes (REVIEW.md attack 4 -- see verify_finding's docstring). This only
+    passes (review notes attack 4 -- see verify_finding's docstring). This only
     answers "did the evidence at least read the real table", never "did it
     read the right rows of it".
     """
@@ -166,13 +166,13 @@ def _evidence_implausibility_reason(evidence: str, csv_path: Path) -> str | None
     )
 
 
-# --- population provenance (research/2026-07-19-agentic-judge-sota.md rec #5) -
+# --- population provenance (the research notes rec #5) -
 # The plausibility check above answers "did the evidence read the real
 # table at all"; it says nothing about HOW MUCH of it. `SELECT avg(x) FROM
 # data WHERE Contract='Month-to-month'` legitimately reads `data` but the
 # claim's number rests on a slice of it -- readers deserve to see that slice
 # size next to the claim ("this rests on 3,875 of 7,043 rows"), even though
-# a narrow population is not itself evidence of a lie (REVIEW.md attack 4
+# a narrow population is not itself evidence of a lie (review notes attack 4
 # remains a documented, separate gap -- this does not close it, it only
 # surfaces the population size so a reader can judge for themselves).
 # `evidence_row_count`/`provenance_note` are therefore pure metadata: they
@@ -409,7 +409,7 @@ def _extract_python_value(
     done for a case a well-formed finding should never produce.
 
     Second, OPTIONAL sentinel (Task A5, population provenance -- SOTA rec
-    #5, research/2026-07-19-agentic-judge-sota.md): evidence code MAY also
+    #5, the research notes): evidence code MAY also
     print `ROWS: <n>` on its own line, the row count of whatever population
     the recomputed value rests on (e.g. `print(f"ROWS: {len(subset)}")`).
     Scanned the same way as `RESULT:` (every non-blank line, case-
@@ -562,7 +562,7 @@ def _claim_agrees_with_value(claim: str, value: float, rel_tol: float, abs_tol: 
     return any(math.isclose(c, value, rel_tol=rel_tol, abs_tol=abs_tol) for c in candidates)
 
 
-# --- population-switch heuristic (Task C3, REVIEW.md attack 4) -----------------
+# --- population-switch heuristic (Task C3, review notes attack 4) -----------------
 # A partial, deterministic mitigation for the one gap the evidence-plausibility
 # check and the value<->evidence compare both miss: evidence that legitimately
 # reads `FROM data` but silently narrows the population with a WHERE filter the
@@ -789,7 +789,7 @@ def verify_finding(
     compare the recomputed value to `finding.value`.
 
     Before executing anything, the evidence must pass a plausibility check
-    (REVIEW.md finding A-1, attacks 1+2): SQL evidence must reference the
+    (review notes finding A-1, attacks 1+2): SQL evidence must reference the
     `data` view in a FROM/JOIN clause; Python evidence must reference the
     dataset's file path (see `_evidence_implausibility_reason`). Evidence
     that fails this -- `SELECT 0.75 AS churn_rate` (no FROM at all),
@@ -806,14 +806,14 @@ def verify_finding(
     didn't produce a disprovable number about the data at all, so "couldn't
     legitimately check" is the honest verdict, not "checked and it's wrong".
 
-    PARTIALLY MITIGATED GAP (REVIEW.md attack 4, Task C3): evidence that
+    PARTIALLY MITIGATED GAP (review notes attack 4, Task C3): evidence that
     legitimately reads `FROM data` but silently narrows the population -- e.g.
     filtering to `Contract='Month-to-month'` while the claim's text says "ALL
     customers" -- passes both the plausibility check and the value compare,
     because the recomputed number is genuinely, correctly derived from a real
     (if differently scoped) query against the real table. VeriGraph (arXiv
     2606.16603) names this failure class "executability can mask weak semantic
-    transitions" -- see research/2026-07-19-agentic-judge-sota.md section 4. A
+    transitions" -- see the research notes section 4. A
     full fix needs a semantic claim<->query check this execution-based judge
     does not attempt; instead, the population-switch HEURISTIC
     (`_population_mismatch_reason`, applied last, below) closes the common,
@@ -832,7 +832,7 @@ def verify_finding(
     filter the parser can't confidently read) remains an accepted false
     negative, not a silent pass-off as `verified`-and-checked.
 
-    Task A5 (population provenance, research/2026-07-19-agentic-judge-sota.md
+    Task A5 (population provenance, the research notes
     rec #5) does not close that gap either -- it only surfaces the
     population size so a reader can spot it themselves. Every returned
     `JudgedFinding` additionally carries `evidence_row_count` (how many rows
@@ -853,7 +853,7 @@ def verify_finding(
     produced a value, but that value disagrees with the claim.
 
     After a successful, value-matching recompute, `finding.claim`'s own text
-    is additionally checked for a disagreeing numeral (REVIEW.md finding A-1,
+    is additionally checked for a disagreeing numeral (review notes finding A-1,
     attack 3: honest evidence + honest `value`, but a claim sentence quoting
     a different number -- e.g. "75% of customers churned" next to
     `value=0.2654` -- used to pass as `verified` because nothing ever read
@@ -991,7 +991,7 @@ _DEFAULT_MAX_ITER = 1000
 # 0, so abs_tol=0 would reject genuine cross-platform float noise (different
 # BLAS/sklearn builds producing e.g. 1e-9 of drift) as a false
 # "contradicted". 1e-9 absorbs exactly that drift magnitude without being
-# anywhere near large enough to mask a real embellishment (REVIEW.md A-3's
+# anywhere near large enough to mask a real embellishment (review notes A-3's
 # smallest, 0.0095).
 _BASELINE_ABS_TOL = 1e-9
 
